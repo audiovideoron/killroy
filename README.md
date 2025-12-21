@@ -92,3 +92,5 @@ Produces platform-specific binaries in `./dist/`.
 ## License
 
 MIT
+
+<!-- Test security scan workflow -->
