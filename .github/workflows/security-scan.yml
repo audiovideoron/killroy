@@ -1,0 +1,32 @@
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run the security-scanner agent on the changes in this PR/push.
+
+            Focus on:
+            - Hardcoded credentials, API keys, secrets
+            - SQL/command injection vulnerabilities
+            - XSS/HTML injection risks
+            - Authentication/session security issues
+
+            If CRITICAL issues are found:
+            - Comment on the PR with detailed findings
+            - Request changes
+
+            If only warnings or clean:
+            - Briefly note the scan completed
+            - Approve if this is a PR

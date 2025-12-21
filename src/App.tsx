@@ -1,42 +1,12 @@
 import { useState, useRef, useCallback } from 'react'
-import { Knob, Toggle } from './Knob'
-
-interface EQBand {
-  frequency: number
-  gain: number
-  q: number
-  enabled: boolean
-}
-
-interface FilterParams {
-  frequency: number
-  q: number
-  enabled: boolean
-}
-
-interface CompressorParams {
-  threshold: number
-  ratio: number
-  attack: number
-  release: number
-  makeup: number
-  emphasis: number
-  mode: 'LEVEL' | 'COMP' | 'LIMIT'
-  enabled: boolean
-}
-
-interface NoiseReductionParams {
-  strength: number
-  enabled: boolean
-}
-
-interface RenderResult {
-  success: boolean
-  error?: string
-  originalPath?: string
-  processedPath?: string
-  renderId?: number
-}
+import { Knob, Toggle } from './components/Knob'
+import type {
+  EQBand,
+  FilterParams,
+  CompressorParams,
+  NoiseReductionParams,
+  RenderResult
+} from '../shared/types'
 
 declare global {
   interface Window {

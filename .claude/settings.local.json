@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Read(//var/folders/k5/jd5z06210n74l21wjc2ll9hm0000gn/T/TemporaryItems/NSIRD_screencaptureui_8ZJWFD/**)",
+      "Bash(curl:*)",
+      "Read(//var/folders/k5/jd5z06210n74l21wjc2ll9hm0000gn/T/TemporaryItems/NSIRD_screencaptureui_ZDUqdM/**)",
+      "Bash(python3:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(docker exec:*)",
+      "WebFetch(domain:konvajs.org)",
+      "Read(//var/folders/k5/jd5z06210n74l21wjc2ll9hm0000gn/T/TemporaryItems/NSIRD_screencaptureui_4R4VBi/**)",
+      "Bash(psql:*)",
+      "Bash(gh issue create:*)",
+      "Bash(gh issue edit:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

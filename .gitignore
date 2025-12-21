@@ -2,8 +2,11 @@ node_modules/
 dist-electron/
 tmp/
 logs/
-__pycache__/
+
+# Media files (test videos go in media/)
+media/
 *.mov
 *.mp4
+
 .envrc
 .DS_Store

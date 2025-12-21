@@ -3,6 +3,13 @@ import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
 import { pathToFileURL } from 'url'
+import type {
+  EQBand,
+  FilterParams,
+  CompressorParams,
+  NoiseReductionParams,
+  RenderOptions
+} from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -86,46 +93,6 @@ ipcMain.handle('select-file', async () => {
   }
   return result.filePaths[0]
 })
-
-interface EQBand {
-  frequency: number
-  gain: number
-  q: number
-  enabled: boolean
-}
-
-interface FilterParams {
-  frequency: number
-  q: number
-  enabled: boolean
-}
-
-interface CompressorParams {
-  threshold: number
-  ratio: number
-  attack: number
-  release: number
-  makeup: number
-  emphasis: number
-  mode: 'LEVEL' | 'COMP' | 'LIMIT'
-  enabled: boolean
-}
-
-interface NoiseReductionParams {
-  strength: number  // 0-100
-  enabled: boolean
-}
-
-interface RenderOptions {
-  inputPath: string
-  startTime: number
-  duration: number
-  bands: EQBand[]
-  hpf: FilterParams
-  lpf: FilterParams
-  compressor: CompressorParams
-  noiseReduction: NoiseReductionParams
-}
 
 function buildEQFilter(bands: EQBand[]): string {
   const enabledBands = bands.filter(b => b.enabled && b.gain !== 0)
