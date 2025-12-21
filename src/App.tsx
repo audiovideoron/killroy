@@ -31,6 +31,21 @@ declare global {
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
 
+// Timing constants for progress UI visibility
+const MIN_VISIBLE_MS = 500   // Minimum time to show running state before terminal
+const TERMINAL_DWELL_MS = 1000  // Time to show terminal state before clearing
+
+interface JobProgressState {
+  jobId: string
+  phase: string
+  percent: number
+  indeterminate: boolean
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out'
+  firstRunningAt?: number  // Timestamp when status first became 'running'
+  terminalAt?: number      // Timestamp when status became terminal
+  clearTimerId?: number    // Timer ID for clearing terminal state
+}
+
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null)
   const [startTime, setStartTime] = useState(0)
@@ -38,10 +53,9 @@ function App() {
   const [status, setStatus] = useState<Status>('idle')
   const [errorMsg, setErrorMsg] = useState('')
 
-  // Progress tracking
-  const [progressPhase, setProgressPhase] = useState<string>('')
-  const [progressPercent, setProgressPercent] = useState<number>(0)
-  const [progressIndeterminate, setProgressIndeterminate] = useState<boolean>(false)
+  // Progress tracking - map of jobId to job state
+  const jobStatesRef = useRef<Map<string, JobProgressState>>(new Map())
+  const [currentJobState, setCurrentJobState] = useState<JobProgressState | null>(null)
 
   const [bands, setBands] = useState<EQBand[]>([
     { frequency: 200, gain: 0, q: 1.0, enabled: true },
@@ -73,27 +87,114 @@ function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  // Subscribe to progress events
+  // Subscribe to progress events with timing enforcement
   useEffect(() => {
     const cleanup = window.electronAPI.onJobProgress((event) => {
       console.log('[progress]', event)
 
+      const jobStates = jobStatesRef.current
+      const now = Date.now()
+      const existingJob = jobStates.get(event.jobId)
+
+      // Clear any existing timer for this job
+      if (existingJob?.clearTimerId) {
+        clearTimeout(existingJob.clearTimerId)
+      }
+
+      // Determine if this is a terminal state
+      const isTerminal = ['completed', 'failed', 'cancelled', 'timed_out'].includes(event.status)
+
       if (event.status === 'running') {
-        setProgressPhase(event.phase || '')
-        setProgressPercent(event.percent || 0)
-        setProgressIndeterminate(event.indeterminate || false)
-      } else if (event.status === 'completed') {
-        setProgressPhase('')
-        setProgressPercent(1.0)
-        setProgressIndeterminate(false)
-      } else if (event.status === 'failed' || event.status === 'cancelled' || event.status === 'timed_out') {
-        setProgressPhase('')
-        setProgressPercent(0)
-        setProgressIndeterminate(false)
+        // Running state - update immediately
+        const newState: JobProgressState = {
+          jobId: event.jobId,
+          phase: event.phase || '',
+          percent: event.percent || 0,
+          indeterminate: event.indeterminate || false,
+          status: event.status,
+          firstRunningAt: existingJob?.firstRunningAt || now
+        }
+
+        jobStates.set(event.jobId, newState)
+        setCurrentJobState({ ...newState })
+
+      } else if (isTerminal) {
+        // Terminal state - enforce MIN_VISIBLE_MS and TERMINAL_DWELL_MS
+        const firstRunningAt = existingJob?.firstRunningAt
+
+        const showTerminal = () => {
+          const terminalState: JobProgressState = {
+            jobId: event.jobId,
+            phase: event.status === 'completed' ? '' : event.phase || '',
+            percent: event.status === 'completed' ? 1.0 : (existingJob?.percent || 0),
+            indeterminate: false,
+            status: event.status,
+            firstRunningAt,
+            terminalAt: Date.now()
+          }
+
+          jobStates.set(event.jobId, terminalState)
+          setCurrentJobState({ ...terminalState })
+
+          // Schedule clearing after TERMINAL_DWELL_MS
+          const clearTimer = window.setTimeout(() => {
+            jobStates.delete(event.jobId)
+            // Only clear UI if this is still the current job
+            setCurrentJobState(prev => prev?.jobId === event.jobId ? null : prev)
+          }, TERMINAL_DWELL_MS)
+
+          terminalState.clearTimerId = clearTimer
+          jobStates.set(event.jobId, terminalState)
+        }
+
+        // Enforce MIN_VISIBLE_MS
+        if (firstRunningAt) {
+          const elapsed = now - firstRunningAt
+          if (elapsed < MIN_VISIBLE_MS) {
+            // Delay showing terminal until MIN_VISIBLE_MS has elapsed
+            const delayTimer = window.setTimeout(showTerminal, MIN_VISIBLE_MS - elapsed)
+
+            // Store temporary timer in job state
+            const delayState: JobProgressState = {
+              ...existingJob!,
+              clearTimerId: delayTimer
+            }
+            jobStates.set(event.jobId, delayState)
+          } else {
+            // Already visible long enough, show terminal immediately
+            showTerminal()
+          }
+        } else {
+          // No firstRunningAt (edge case), show terminal immediately
+          showTerminal()
+        }
+
+      } else if (event.status === 'queued') {
+        // Queued state - store but don't display prominently
+        const queuedState: JobProgressState = {
+          jobId: event.jobId,
+          phase: event.phase || '',
+          percent: 0,
+          indeterminate: true,
+          status: 'queued'
+        }
+
+        jobStates.set(event.jobId, queuedState)
+        setCurrentJobState({ ...queuedState })
       }
     })
 
-    return cleanup
+    // Cleanup all timers on unmount
+    return () => {
+      cleanup()
+      const jobStates = jobStatesRef.current
+      jobStates.forEach(job => {
+        if (job.clearTimerId) {
+          clearTimeout(job.clearTimerId)
+        }
+      })
+      jobStates.clear()
+    }
   }, [])
 
   const handleSelectFile = async () => {
@@ -169,16 +270,35 @@ function App() {
 
   const statusClass = status
 
-  // Build status text with progress info when rendering
+  // Build status text with progress info and terminal states
   let statusText: string
-  if (status === 'rendering') {
-    const phaseName = progressPhase === 'original-preview' ? 'Original' : progressPhase === 'processed-preview' ? 'Processed' : ''
-    if (progressIndeterminate) {
-      statusText = `Rendering ${phaseName}...`
+  if (currentJobState) {
+    const phaseName = currentJobState.phase === 'original-preview' ? 'Original' :
+                      currentJobState.phase === 'processed-preview' ? 'Processed' : ''
+
+    if (currentJobState.status === 'running') {
+      if (currentJobState.indeterminate) {
+        statusText = `Rendering ${phaseName}...`
+      } else {
+        const percentDisplay = Math.round(currentJobState.percent * 100)
+        statusText = `Rendering ${phaseName}... ${percentDisplay}%`
+      }
+    } else if (currentJobState.status === 'completed') {
+      statusText = 'Completed'
+    } else if (currentJobState.status === 'failed') {
+      statusText = 'Failed'
+    } else if (currentJobState.status === 'cancelled') {
+      statusText = 'Cancelled'
+    } else if (currentJobState.status === 'timed_out') {
+      statusText = 'Timed out'
+    } else if (currentJobState.status === 'queued') {
+      statusText = 'Queued...'
     } else {
-      const percentDisplay = Math.round(progressPercent * 100)
-      statusText = `Rendering ${phaseName}... ${percentDisplay}%`
+      statusText = 'Rendering...'
     }
+  } else if (status === 'rendering') {
+    // Fallback if no job state yet
+    statusText = 'Rendering...'
   } else {
     statusText = {
       idle: 'Idle - Select a file and render preview',
@@ -566,12 +686,12 @@ function App() {
           <div className={`status ${statusClass}`} style={{ marginLeft: 12 }}>
             {statusText}
           </div>
-          {status === 'rendering' && (
+          {currentJobState && (currentJobState.status === 'running' || currentJobState.status === 'queued') && (
             <div style={{ width: 200, marginLeft: 12 }}>
-              {progressIndeterminate ? (
+              {currentJobState.indeterminate ? (
                 <progress style={{ width: '100%' }} />
               ) : (
-                <progress value={progressPercent} max={1} style={{ width: '100%' }} />
+                <progress value={currentJobState.percent} max={1} style={{ width: '100%' }} />
               )}
             </div>
           )}
