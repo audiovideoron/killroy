@@ -17,6 +17,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@beta
         with:
+          mode: direct
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           direct_prompt: |
             Run the security-scanner agent on the changes in this PR/push.
