@@ -27,6 +27,7 @@ interface FFmpegJob {
   durationSeconds?: number   // Expected duration for progress calculation
   phase?: string             // Job context (e.g., "original-preview", "processed-preview")
   lastProgressEmit?: number  // Timestamp of last progress event (for throttling)
+  tempDir?: string           // Per-job temp directory for intermediate files
 }
 
 /**
@@ -327,6 +328,26 @@ async function probeMediaMetadata(filePath: string): Promise<FFprobeResult> {
 }
 
 /**
+ * Get the application's temporary directory root.
+ * Uses Electron's temp path API to work correctly when packaged.
+ * Creates the directory if it doesn't exist.
+ *
+ * @returns Absolute path to app-specific temp root directory
+ */
+function getTempRoot(): string {
+  // Use Electron's temp directory API (works in dev and packaged app)
+  // Create app-specific subdirectory to avoid conflicts
+  const appTempRoot = path.join(app.getPath('temp'), 'audio-pro')
+
+  if (!fs.existsSync(appTempRoot)) {
+    fs.mkdirSync(appTempRoot, { recursive: true })
+  }
+
+  return appTempRoot
+}
+
+/**
+ * DEPRECATED: Use createJobTempDir() instead for per-job isolation.
  * Get the application's temporary directory for preview files.
  * Uses Electron's temp path API to work correctly when packaged.
  * Creates the directory if it doesn't exist.
@@ -343,6 +364,108 @@ function getTempDir(): string {
   }
 
   return appTempDir
+}
+
+/**
+ * Create a temporary directory for a specific job.
+ * All intermediate files for this job should be written here.
+ *
+ * @param jobId Unique job identifier
+ * @returns Absolute path to job-specific temp directory
+ */
+function createJobTempDir(jobId: string): string {
+  const tempRoot = getTempRoot()
+  const jobTempDir = path.join(tempRoot, `job-${jobId}`)
+
+  if (!fs.existsSync(jobTempDir)) {
+    fs.mkdirSync(jobTempDir, { recursive: true })
+  }
+
+  console.log(`[temp] Created job temp directory: ${jobTempDir}`)
+  return jobTempDir
+}
+
+/**
+ * Clean up a job's temporary directory.
+ * Safe to call multiple times; will not throw if directory doesn't exist.
+ *
+ * @param jobId Unique job identifier
+ * @param tempDir Path to job temp directory (optional, will be derived from jobId if not provided)
+ */
+function cleanupJobTempDir(jobId: string, tempDir?: string): void {
+  // Check PRESERVE_TEMP_FILES environment variable
+  if (process.env.PRESERVE_TEMP_FILES === 'true') {
+    console.log(`[temp] Preserving temp directory for job ${jobId} (PRESERVE_TEMP_FILES=true)`)
+    return
+  }
+
+  const jobTempDir = tempDir || path.join(getTempRoot(), `job-${jobId}`)
+
+  if (!fs.existsSync(jobTempDir)) {
+    return
+  }
+
+  try {
+    // Remove directory recursively
+    fs.rmSync(jobTempDir, { recursive: true, force: true })
+    console.log(`[temp] Cleaned up job temp directory: ${jobTempDir}`)
+  } catch (err) {
+    // Don't throw - log and continue
+    console.error(`[temp] Failed to clean up job temp directory ${jobTempDir}:`, err)
+  }
+}
+
+/**
+ * Clean up stale job directories on app startup.
+ * Removes job directories older than the specified threshold.
+ *
+ * @param maxAgeMs Maximum age in milliseconds (default: 24 hours)
+ */
+function cleanupStaleJobDirs(maxAgeMs: number = 24 * 60 * 60 * 1000): void {
+  // Check PRESERVE_TEMP_FILES environment variable
+  if (process.env.PRESERVE_TEMP_FILES === 'true') {
+    console.log('[temp] Skipping stale directory cleanup (PRESERVE_TEMP_FILES=true)')
+    return
+  }
+
+  const tempRoot = getTempRoot()
+
+  if (!fs.existsSync(tempRoot)) {
+    return
+  }
+
+  try {
+    const entries = fs.readdirSync(tempRoot, { withFileTypes: true })
+    const now = Date.now()
+    let removedCount = 0
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('job-')) {
+        continue
+      }
+
+      const dirPath = path.join(tempRoot, entry.name)
+
+      try {
+        const stats = fs.statSync(dirPath)
+        const ageMs = now - stats.mtimeMs
+
+        if (ageMs >= maxAgeMs) {
+          fs.rmSync(dirPath, { recursive: true, force: true })
+          console.log(`[temp] Removed stale job directory: ${entry.name} (age: ${Math.round(ageMs / 1000 / 60)}min)`)
+          removedCount++
+        }
+      } catch (err) {
+        console.error(`[temp] Failed to check/remove directory ${entry.name}:`, err)
+      }
+    }
+
+    if (removedCount > 0) {
+      console.log(`[temp] Cleaned up ${removedCount} stale job directories`)
+    }
+  } catch (err) {
+    console.error('[temp] Failed to scan temp root for stale directories:', err)
+  }
 }
 
 // Initialize temp directory (will be created on first access)
@@ -426,6 +549,9 @@ protocol.registerSchemesAsPrivileged([
 app.whenReady().then(() => {
   // Initialize temp directory using Electron's path API
   tmpDir = getTempDir()
+
+  // Clean up stale job directories from previous runs
+  cleanupStaleJobDirs()
 
   // Handle appfile:// protocol - proxy to file:// via net.fetch (supports Range requests)
   // Security: Only serves files that have been explicitly approved via the allowlist
@@ -740,14 +866,15 @@ async function tryRenderStrategies(
   attempts: RenderAttempt[],
   context: string,
   durationSeconds?: number,
-  phase?: string
+  phase?: string,
+  jobId?: string
 ): Promise<FFmpegResult> {
   const failures: RenderAttemptFailure[] = []
 
   for (const attempt of attempts) {
     try {
       console.log(`[${context}] Trying ${attempt.name}:`, attempt.args.join(' '))
-      const result = await runFFmpeg(attempt.args, 5 * 60 * 1000, durationSeconds, phase)
+      const result = await runFFmpeg(attempt.args, 5 * 60 * 1000, durationSeconds, phase, jobId)
       console.log(`[${context}] ${attempt.name} succeeded`)
       return result
     } catch (error: any) {
@@ -821,6 +948,11 @@ function cleanupFFmpegJob(jobId: string): void {
   // Remove from registry
   activeFFmpegJobs.delete(jobId)
   console.log(`[ffmpeg] Cleaned up job ${jobId}, ${activeFFmpegJobs.size} jobs remaining`)
+
+  // Clean up job temp directory
+  if (job.tempDir) {
+    cleanupJobTempDir(jobId, job.tempDir)
+  }
 }
 
 /**
@@ -830,17 +962,22 @@ function cleanupFFmpegJob(jobId: string): void {
  * @param timeoutMs Timeout in milliseconds (default: 5 minutes)
  * @param durationSeconds Expected duration in seconds for progress calculation (optional)
  * @param phase Job context/phase name for progress events (optional)
+ * @param providedJobId Optional pre-generated job ID (for coordinating with caller)
  * @returns Promise that resolves with FFmpeg result or rejects with structured error
  */
 function runFFmpeg(
   args: string[],
   timeoutMs: number = 5 * 60 * 1000,
   durationSeconds?: number,
-  phase?: string
+  phase?: string,
+  providedJobId?: string
 ): Promise<FFmpegResult> {
   return new Promise((resolve, reject) => {
-    // Generate unique job ID
-    const jobId = `ffmpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    // Use provided job ID or generate unique one
+    const jobId = providedJobId || `ffmpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`
+
+    // Create job temp directory (safe to call even if already created)
+    const jobTempDir = createJobTempDir(jobId)
 
     console.log(`[ffmpeg] Starting job ${jobId}:`, 'ffmpeg', args.join(' '))
 
@@ -885,7 +1022,8 @@ function runFFmpeg(
       startTime: Date.now(),
       timeoutHandle,
       durationSeconds,
-      phase
+      phase,
+      tempDir: jobTempDir
     }
     activeFFmpegJobs.set(jobId, job)
     console.log(`[ffmpeg] Registered job ${jobId}, ${activeFFmpegJobs.size} jobs active`)
@@ -971,11 +1109,15 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
     // (Should already be approved from select-file, but ensure it here for defense in depth)
     approveFilePath(inputPath)
 
-    // Generate unique filenames per render
+    // Generate job ID and create temp directory for this render
+    const jobId = `ffmpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    const jobTempDir = createJobTempDir(jobId)
+
+    // Generate unique filenames in job temp directory
     const baseName = path.basename(inputPath, path.extname(inputPath))
     const renderId = Date.now()
-    const originalOutput = path.join(tmpDir, `${baseName}-original-${renderId}.mp4`)
-    const processedOutput = path.join(tmpDir, `${baseName}-processed-${renderId}.mp4`)
+    const originalOutput = path.join(jobTempDir, `${baseName}-original-${renderId}.mp4`)
+    const processedOutput = path.join(jobTempDir, `${baseName}-processed-${renderId}.mp4`)
 
     // Approve output files for appfile:// protocol access
     approveFilePath(originalOutput)
@@ -1043,7 +1185,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       }
     ]
 
-    await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview')
+    await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId)
 
     // Render processed preview with full filter chain (HPF -> EQ -> LPF -> Compressor)
     const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction)
@@ -1100,7 +1242,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       }
     ]
 
-    await tryRenderStrategies(processedAttempts, 'processed-preview', duration, 'processed-preview')
+    await tryRenderStrategies(processedAttempts, 'processed-preview', duration, 'processed-preview', jobId)
 
     console.log('[render-preview] complete:', originalOutput, processedOutput)
 
@@ -1108,7 +1250,8 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       success: true,
       originalPath: originalOutput,
       processedPath: processedOutput,
-      renderId
+      renderId,
+      jobId
     }
   } catch (error: any) {
     console.error('[render-preview] FFmpeg error:', error)
