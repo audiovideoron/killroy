@@ -13,10 +13,68 @@ import type {
 
 let mainWindow: BrowserWindow | null = null
 
-// Ensure tmp directory exists
-const tmpDir = path.join(process.cwd(), 'tmp')
-if (!fs.existsSync(tmpDir)) {
-  fs.mkdirSync(tmpDir, { recursive: true })
+/**
+ * Get the application's temporary directory for preview files.
+ * Uses Electron's temp path API to work correctly when packaged.
+ * Creates the directory if it doesn't exist.
+ *
+ * @returns Absolute path to app-specific temp directory
+ */
+function getTempDir(): string {
+  // Use Electron's temp directory API (works in dev and packaged app)
+  // Create app-specific subdirectory to avoid conflicts
+  const appTempDir = path.join(app.getPath('temp'), 'audio-pro-previews')
+
+  if (!fs.existsSync(appTempDir)) {
+    fs.mkdirSync(appTempDir, { recursive: true })
+  }
+
+  return appTempDir
+}
+
+// Initialize temp directory (will be created on first access)
+let tmpDir: string
+
+// Security: Allowlist of approved file paths for appfile:// protocol
+// Only files explicitly approved (user-selected or app-generated) can be served
+const approvedFilePaths = new Set<string>()
+
+/**
+ * Safely resolve and normalize a file path for comparison.
+ * Handles platform-specific path separators and case sensitivity.
+ */
+function normalizePath(filePath: string): string {
+  const resolved = path.resolve(filePath)
+  // Normalize to lowercase on Windows for case-insensitive comparison
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+/**
+ * Add a file path to the approved list for appfile:// protocol access.
+ * Path is normalized to prevent bypasses via different representations.
+ */
+function approveFilePath(filePath: string): void {
+  const normalized = normalizePath(filePath)
+  approvedFilePaths.add(normalized)
+  console.log('[security] Approved file path:', normalized)
+}
+
+/**
+ * Check if a file path is approved for appfile:// protocol access.
+ * Returns the normalized path if approved, null otherwise.
+ */
+function validateFilePath(requestedPath: string): string | null {
+  try {
+    const normalized = normalizePath(requestedPath)
+    if (approvedFilePaths.has(normalized)) {
+      return normalized
+    }
+    console.warn('[security] Rejected unapproved file path:', requestedPath)
+    return null
+  } catch (err) {
+    console.error('[security] Path validation error:', err)
+    return null
+  }
 }
 
 function createWindow() {
@@ -52,16 +110,31 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 app.whenReady().then(() => {
-  // Handle appfile:// protocol - proxy to file:// via net.fetch (supports Range requests)
-  protocol.handle('appfile', (request) => {
-    // appfile:///absolute/path -> /absolute/path
-    const url = new URL(request.url)
-    const filePath = decodeURIComponent(url.pathname)
-    const absolutePath = path.resolve(filePath)
+  // Initialize temp directory using Electron's path API
+  tmpDir = getTempDir()
 
-    // Use pathToFileURL + net.fetch to properly serve files with streaming support
-    const fileUrl = pathToFileURL(absolutePath).href
-    return net.fetch(fileUrl)
+  // Handle appfile:// protocol - proxy to file:// via net.fetch (supports Range requests)
+  // Security: Only serves files that have been explicitly approved via the allowlist
+  protocol.handle('appfile', (request) => {
+    try {
+      // appfile:///absolute/path -> /absolute/path
+      const url = new URL(request.url)
+      const filePath = decodeURIComponent(url.pathname)
+
+      // Validate against allowlist
+      const validatedPath = validateFilePath(filePath)
+      if (!validatedPath) {
+        console.error('[security] Blocked appfile request for unapproved path:', filePath)
+        return new Response('Forbidden: File not approved for access', { status: 403 })
+      }
+
+      // Use pathToFileURL + net.fetch to properly serve files with streaming support
+      const fileUrl = pathToFileURL(validatedPath).href
+      return net.fetch(fileUrl)
+    } catch (err) {
+      console.error('[security] appfile protocol error:', err)
+      return new Response('Bad Request', { status: 400 })
+    }
   })
 
   createWindow()
@@ -79,6 +152,27 @@ app.on('activate', () => {
   }
 })
 
+// Cleanup temp directory on app quit
+app.on('will-quit', () => {
+  try {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      // Remove all preview files from temp directory
+      const files = fs.readdirSync(tmpDir)
+      for (const file of files) {
+        const filePath = path.join(tmpDir, file)
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+        }
+      }
+      // Remove the directory itself
+      fs.rmdirSync(tmpDir)
+      console.log('[cleanup] Removed temp directory:', tmpDir)
+    }
+  } catch (err) {
+    console.error('[cleanup] Failed to clean temp directory:', err)
+  }
+})
+
 // IPC Handlers
 
 ipcMain.handle('select-file', async () => {
@@ -91,7 +185,10 @@ ipcMain.handle('select-file', async () => {
   if (result.canceled || result.filePaths.length === 0) {
     return null
   }
-  return result.filePaths[0]
+  const selectedPath = result.filePaths[0]
+  // Approve user-selected file for appfile:// protocol access
+  approveFilePath(selectedPath)
+  return selectedPath
 })
 
 function buildEQFilter(bands: EQBand[]): string {
@@ -261,11 +358,19 @@ function runFFmpeg(args: string[]): Promise<{ success: boolean; stderr: string }
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
   const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction } = options
 
+  // Approve input file for appfile:// protocol access
+  // (Should already be approved from select-file, but ensure it here for defense in depth)
+  approveFilePath(inputPath)
+
   // Generate unique filenames per render
   const baseName = path.basename(inputPath, path.extname(inputPath))
   const renderId = Date.now()
   const originalOutput = path.join(tmpDir, `${baseName}-original-${renderId}.mp4`)
   const processedOutput = path.join(tmpDir, `${baseName}-processed-${renderId}.mp4`)
+
+  // Approve output files for appfile:// protocol access
+  approveFilePath(originalOutput)
+  approveFilePath(processedOutput)
 
   console.log('[render-preview] inputPath:', inputPath)
   console.log('[render-preview] outputs:', originalOutput, processedOutput)
