@@ -1,0 +1,9 @@
+node_modules/
+dist-electron/
+tmp/
+logs/
+__pycache__/
+*.mov
+*.mp4
+.envrc
+.DS_Store
