@@ -8,7 +8,9 @@ import type {
   FilterParams,
   CompressorParams,
   NoiseReductionParams,
-  RenderOptions
+  RenderOptions,
+  JobProgressEvent,
+  JobStatus
 } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
@@ -22,6 +24,9 @@ interface FFmpegJob {
   process: ChildProcess
   startTime: number
   timeoutHandle: NodeJS.Timeout | null
+  durationSeconds?: number   // Expected duration for progress calculation
+  phase?: string             // Job context (e.g., "original-preview", "processed-preview")
+  lastProgressEmit?: number  // Timestamp of last progress event (for throttling)
 }
 
 /**
@@ -52,6 +57,123 @@ const SUPPORTED_MEDIA_EXTENSIONS = new Set([
   '.m4v', '.flv', '.wmv', '.mpg', '.mpeg',
   '.3gp', '.ogv', '.ts', '.mts', '.m2ts'
 ])
+
+/**
+ * Progress information parsed from FFmpeg stderr
+ */
+interface FFmpegProgress {
+  positionSeconds: number
+  rawLine: string
+}
+
+/**
+ * Parse FFmpeg stderr line for progress information.
+ * Looks for patterns like: time=00:01:23.45 or time=83.45
+ *
+ * @param line Single line from FFmpeg stderr
+ * @returns Progress info if found, null otherwise
+ */
+function parseFFmpegProgress(line: string): FFmpegProgress | null {
+  // Pattern 1: time=HH:MM:SS.ms (e.g., time=00:01:23.45)
+  const timeMatch = line.match(/time=(\d{2}):(\d{2}):(\d{2})\.(\d+)/)
+  if (timeMatch) {
+    const hours = parseInt(timeMatch[1], 10)
+    const minutes = parseInt(timeMatch[2], 10)
+    const seconds = parseInt(timeMatch[3], 10)
+    const milliseconds = parseInt(timeMatch[4], 10)
+
+    const positionSeconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 100
+    return { positionSeconds, rawLine: line }
+  }
+
+  // Pattern 2: time=seconds (e.g., time=83.45)
+  const simpleTimeMatch = line.match(/time=(\d+\.?\d*)/)
+  if (simpleTimeMatch) {
+    const positionSeconds = parseFloat(simpleTimeMatch[1])
+    return { positionSeconds, rawLine: line }
+  }
+
+  // Pattern 3: out_time_ms=milliseconds (ffmpeg -progress pipe:2 format)
+  const outTimeMsMatch = line.match(/out_time_ms=(\d+)/)
+  if (outTimeMsMatch) {
+    const positionMs = parseInt(outTimeMsMatch[1], 10)
+    const positionSeconds = positionMs / 1_000_000  // FFmpeg uses microseconds
+    return { positionSeconds, rawLine: line }
+  }
+
+  return null
+}
+
+/**
+ * Emit progress event to renderer process.
+ * Throttled to max 10 updates/sec per job.
+ *
+ * @param job FFmpeg job
+ * @param positionSeconds Current time position in seconds
+ * @param status Job status (default: 'running')
+ */
+function emitProgress(job: FFmpegJob, positionSeconds: number, status: JobStatus = 'running'): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  // Throttle: max 100ms between updates (10 updates/sec)
+  const now = Date.now()
+  if (job.lastProgressEmit && now - job.lastProgressEmit < 100) {
+    return
+  }
+  job.lastProgressEmit = now
+
+  const event: JobProgressEvent = {
+    jobId: job.id,
+    status,
+    positionSeconds,
+    phase: job.phase
+  }
+
+  // Add percent if duration is known
+  if (job.durationSeconds && job.durationSeconds > 0) {
+    event.durationSeconds = job.durationSeconds
+    event.percent = Math.min(1, Math.max(0, positionSeconds / job.durationSeconds))
+    event.indeterminate = false
+  } else {
+    event.indeterminate = true
+  }
+
+  mainWindow.webContents.send('job:progress', event)
+}
+
+/**
+ * Emit terminal state event (completed, failed, cancelled, timed_out).
+ * Always emits, bypassing throttle.
+ *
+ * @param job FFmpeg job
+ * @param status Terminal status
+ * @param percent Final percent (default: last known position)
+ */
+function emitTerminalState(job: FFmpegJob, status: JobStatus, percent?: number): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  const event: JobProgressEvent = {
+    jobId: job.id,
+    status,
+    phase: job.phase
+  }
+
+  if (percent !== undefined) {
+    event.percent = percent
+    event.indeterminate = false
+  } else if (job.durationSeconds) {
+    event.durationSeconds = job.durationSeconds
+    event.indeterminate = false
+  } else {
+    event.indeterminate = true
+  }
+
+  mainWindow.webContents.send('job:progress', event)
+}
 
 /**
  * Validate a user-supplied media file path before FFmpeg/ffprobe execution.
@@ -616,14 +738,16 @@ function diagnoseFFmpegFailure(stderr: string): string | null {
  */
 async function tryRenderStrategies(
   attempts: RenderAttempt[],
-  context: string
+  context: string,
+  durationSeconds?: number,
+  phase?: string
 ): Promise<FFmpegResult> {
   const failures: RenderAttemptFailure[] = []
 
   for (const attempt of attempts) {
     try {
       console.log(`[${context}] Trying ${attempt.name}:`, attempt.args.join(' '))
-      const result = await runFFmpeg(attempt.args)
+      const result = await runFFmpeg(attempt.args, 5 * 60 * 1000, durationSeconds, phase)
       console.log(`[${context}] ${attempt.name} succeeded`)
       return result
     } catch (error: any) {
@@ -700,15 +824,19 @@ function cleanupFFmpegJob(jobId: string): void {
 }
 
 /**
- * Run FFmpeg with job tracking, timeout enforcement, and guaranteed cleanup.
+ * Run FFmpeg with job tracking, timeout enforcement, progress reporting, and guaranteed cleanup.
  *
  * @param args FFmpeg command-line arguments
  * @param timeoutMs Timeout in milliseconds (default: 5 minutes)
+ * @param durationSeconds Expected duration in seconds for progress calculation (optional)
+ * @param phase Job context/phase name for progress events (optional)
  * @returns Promise that resolves with FFmpeg result or rejects with structured error
  */
 function runFFmpeg(
   args: string[],
-  timeoutMs: number = 5 * 60 * 1000
+  timeoutMs: number = 5 * 60 * 1000,
+  durationSeconds?: number,
+  phase?: string
 ): Promise<FFmpegResult> {
   return new Promise((resolve, reject) => {
     // Generate unique job ID
@@ -739,6 +867,10 @@ function runFFmpeg(
     // Set up timeout
     const timeoutHandle = setTimeout(() => {
       console.error(`[ffmpeg] Job ${jobId} timed out after ${timeoutMs}ms`)
+      const job = activeFFmpegJobs.get(jobId)
+      if (job) {
+        emitTerminalState(job, 'timed_out')
+      }
       rejectOnce({
         type: FFmpegErrorType.TIMEOUT,
         message: `FFmpeg operation timed out after ${timeoutMs / 1000}s`,
@@ -751,14 +883,42 @@ function runFFmpeg(
       id: jobId,
       process: proc,
       startTime: Date.now(),
-      timeoutHandle
+      timeoutHandle,
+      durationSeconds,
+      phase
     }
     activeFFmpegJobs.set(jobId, job)
     console.log(`[ffmpeg] Registered job ${jobId}, ${activeFFmpegJobs.size} jobs active`)
 
-    // Capture stderr
+    // Emit initial queued state
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const event: JobProgressEvent = {
+        jobId,
+        status: 'queued',
+        phase,
+        durationSeconds,
+        indeterminate: !durationSeconds
+      }
+      mainWindow.webContents.send('job:progress', event)
+    }
+
+    // Capture stderr and parse for progress
+    let stderrBuffer = ''
     proc.stderr.on('data', (data) => {
-      stderr += data.toString()
+      const chunk = data.toString()
+      stderr += chunk
+      stderrBuffer += chunk
+
+      // Process complete lines
+      const lines = stderrBuffer.split('\n')
+      stderrBuffer = lines.pop() || ''  // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        const progress = parseFFmpegProgress(line)
+        if (progress) {
+          emitProgress(job, progress.positionSeconds)
+        }
+      }
     })
 
     // Handle process exit
@@ -767,8 +927,10 @@ function runFFmpeg(
       console.log(`[ffmpeg] Job ${jobId} exited with code ${code} after ${duration}ms`)
 
       if (code === 0) {
+        emitTerminalState(job, 'completed', 1.0)
         resolveOnce({ success: true, stderr })
       } else {
+        emitTerminalState(job, 'failed')
         rejectOnce({
           type: FFmpegErrorType.NON_ZERO_EXIT,
           message: `FFmpeg exited with code ${code}`,
@@ -781,6 +943,7 @@ function runFFmpeg(
     // Handle spawn errors
     proc.on('error', (err) => {
       console.error(`[ffmpeg] Job ${jobId} spawn error:`, err)
+      emitTerminalState(job, 'failed')
       rejectOnce({
         type: FFmpegErrorType.SPAWN_FAILED,
         message: `Failed to start FFmpeg: ${err.message}`,
@@ -880,7 +1043,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       }
     ]
 
-    await tryRenderStrategies(originalAttempts, 'original-preview')
+    await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview')
 
     // Render processed preview with full filter chain (HPF -> EQ -> LPF -> Compressor)
     const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction)
@@ -937,7 +1100,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       }
     ]
 
-    await tryRenderStrategies(processedAttempts, 'processed-preview')
+    await tryRenderStrategies(processedAttempts, 'processed-preview', duration, 'processed-preview')
 
     console.log('[render-preview] complete:', originalOutput, processedOutput)
 
@@ -991,6 +1154,9 @@ ipcMain.handle('cancel-render', (_event, jobId: string) => {
   }
 
   console.log(`[ffmpeg] Cancelling job ${jobId}`)
+
+  // Emit cancelled state before cleanup
+  emitTerminalState(job, 'cancelled')
 
   // Clean up will kill the process
   cleanupFFmpegJob(jobId)

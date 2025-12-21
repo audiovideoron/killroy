@@ -1,11 +1,12 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Knob, Toggle } from './components/Knob'
 import type {
   EQBand,
   FilterParams,
   CompressorParams,
   NoiseReductionParams,
-  RenderResult
+  RenderResult,
+  JobProgressEvent
 } from '../shared/types'
 
 declare global {
@@ -23,6 +24,7 @@ declare global {
         noiseReduction: NoiseReductionParams
       }) => Promise<RenderResult>
       getFileUrl: (filePath: string) => Promise<string>
+      onJobProgress: (callback: (event: JobProgressEvent) => void) => () => void
     }
   }
 }
@@ -35,6 +37,11 @@ function App() {
   const [duration, setDuration] = useState(15)
   const [status, setStatus] = useState<Status>('idle')
   const [errorMsg, setErrorMsg] = useState('')
+
+  // Progress tracking
+  const [progressPhase, setProgressPhase] = useState<string>('')
+  const [progressPercent, setProgressPercent] = useState<number>(0)
+  const [progressIndeterminate, setProgressIndeterminate] = useState<boolean>(false)
 
   const [bands, setBands] = useState<EQBand[]>([
     { frequency: 200, gain: 0, q: 1.0, enabled: true },
@@ -65,6 +72,29 @@ function App() {
   const [processedUrl, setProcessedUrl] = useState<string | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+
+  // Subscribe to progress events
+  useEffect(() => {
+    const cleanup = window.electronAPI.onJobProgress((event) => {
+      console.log('[progress]', event)
+
+      if (event.status === 'running') {
+        setProgressPhase(event.phase || '')
+        setProgressPercent(event.percent || 0)
+        setProgressIndeterminate(event.indeterminate || false)
+      } else if (event.status === 'completed') {
+        setProgressPhase('')
+        setProgressPercent(1.0)
+        setProgressIndeterminate(false)
+      } else if (event.status === 'failed' || event.status === 'cancelled' || event.status === 'timed_out') {
+        setProgressPhase('')
+        setProgressPercent(0)
+        setProgressIndeterminate(false)
+      }
+    })
+
+    return cleanup
+  }, [])
 
   const handleSelectFile = async () => {
     const path = await window.electronAPI.selectFile()
@@ -138,12 +168,24 @@ function App() {
   }
 
   const statusClass = status
-  const statusText = {
-    idle: 'Idle - Select a file and render preview',
-    rendering: 'Rendering preview...',
-    done: 'Done - Ready to play A/B',
-    error: `Error: ${errorMsg}`
-  }[status]
+
+  // Build status text with progress info when rendering
+  let statusText: string
+  if (status === 'rendering') {
+    const phaseName = progressPhase === 'original-preview' ? 'Original' : progressPhase === 'processed-preview' ? 'Processed' : ''
+    if (progressIndeterminate) {
+      statusText = `Rendering ${phaseName}...`
+    } else {
+      const percentDisplay = Math.round(progressPercent * 100)
+      statusText = `Rendering ${phaseName}... ${percentDisplay}%`
+    }
+  } else {
+    statusText = {
+      idle: 'Idle - Select a file and render preview',
+      done: 'Done - Ready to play A/B',
+      error: `Error: ${errorMsg}`
+    }[status] || 'Idle'
+  }
 
   return (
     <div>
@@ -524,6 +566,15 @@ function App() {
           <div className={`status ${statusClass}`} style={{ marginLeft: 12 }}>
             {statusText}
           </div>
+          {status === 'rendering' && (
+            <div style={{ width: 200, marginLeft: 12 }}>
+              {progressIndeterminate ? (
+                <progress style={{ width: '100%' }} />
+              ) : (
+                <progress value={progressPercent} max={1} style={{ width: '100%' }} />
+              )}
+            </div>
+          )}
         </div>
       </div>
 
