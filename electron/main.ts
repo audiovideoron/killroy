@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, protocol, net } from 'electron'
-import { spawn } from 'child_process'
+import { spawn, ChildProcess } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
 import { pathToFileURL } from 'url'
@@ -12,6 +12,197 @@ import type {
 } from '../shared/types'
 
 let mainWindow: BrowserWindow | null = null
+
+/**
+ * FFmpeg job tracking for lifecycle management.
+ * Ensures all FFmpeg processes are tracked, cancellable, and cleaned up.
+ */
+interface FFmpegJob {
+  id: string
+  process: ChildProcess
+  startTime: number
+  timeoutHandle: NodeJS.Timeout | null
+}
+
+/**
+ * Registry of active FFmpeg jobs.
+ * Every spawned FFmpeg process MUST be registered here.
+ */
+const activeFFmpegJobs = new Map<string, FFmpegJob>()
+
+/**
+ * Path validation failure reasons
+ */
+type PathValidationFailure =
+  | 'NOT_ABSOLUTE'
+  | 'NOT_FOUND'
+  | 'NOT_READABLE'
+  | 'NOT_FILE'
+  | 'UNSUPPORTED_TYPE'
+
+type PathValidationResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: PathValidationFailure; message: string }
+
+/**
+ * Supported media file extensions (video with audio tracks)
+ */
+const SUPPORTED_MEDIA_EXTENSIONS = new Set([
+  '.mp4', '.mov', '.mkv', '.avi', '.webm',
+  '.m4v', '.flv', '.wmv', '.mpg', '.mpeg',
+  '.3gp', '.ogv', '.ts', '.mts', '.m2ts'
+])
+
+/**
+ * Validate a user-supplied media file path before FFmpeg/ffprobe execution.
+ * Checks: absolute path, existence, readability, is file, supported extension.
+ *
+ * @param filePath User-supplied path (must be absolute)
+ * @returns Validation result with typed failure reasons
+ */
+function validateMediaPath(filePath: string): PathValidationResult {
+  // Must be absolute path
+  if (!path.isAbsolute(filePath)) {
+    return {
+      ok: false,
+      reason: 'NOT_ABSOLUTE',
+      message: `Path must be absolute: ${filePath}`
+    }
+  }
+
+  // Check file exists and get stats
+  let stats: fs.Stats
+  try {
+    stats = fs.statSync(filePath)
+  } catch (err: any) {
+    if (err.code === 'ENOENT') {
+      return {
+        ok: false,
+        reason: 'NOT_FOUND',
+        message: `File not found: ${filePath}`
+      }
+    }
+    if (err.code === 'EACCES') {
+      return {
+        ok: false,
+        reason: 'NOT_READABLE',
+        message: `Permission denied: ${filePath}`
+      }
+    }
+    return {
+      ok: false,
+      reason: 'NOT_READABLE',
+      message: `Cannot access file: ${err.message}`
+    }
+  }
+
+  // Must be a regular file (not directory, symlink, etc)
+  if (!stats.isFile()) {
+    return {
+      ok: false,
+      reason: 'NOT_FILE',
+      message: `Path is not a regular file: ${filePath}`
+    }
+  }
+
+  // Check file is readable
+  try {
+    fs.accessSync(filePath, fs.constants.R_OK)
+  } catch {
+    return {
+      ok: false,
+      reason: 'NOT_READABLE',
+      message: `File is not readable: ${filePath}`
+    }
+  }
+
+  // Check extension is supported
+  const ext = path.extname(filePath).toLowerCase()
+  if (!SUPPORTED_MEDIA_EXTENSIONS.has(ext)) {
+    return {
+      ok: false,
+      reason: 'UNSUPPORTED_TYPE',
+      message: `Unsupported file type: ${ext}. Supported: ${Array.from(SUPPORTED_MEDIA_EXTENSIONS).join(', ')}`
+    }
+  }
+
+  return { ok: true, path: filePath }
+}
+
+/**
+ * FFprobe stream information
+ */
+interface FFprobeStream {
+  codec_type: string
+  codec_name?: string
+  channels?: number
+  sample_rate?: string
+  [key: string]: any
+}
+
+interface FFprobeFormat {
+  filename?: string
+  duration?: string
+  format_name?: string
+  [key: string]: any
+}
+
+interface FFprobeResult {
+  streams: FFprobeStream[]
+  format: FFprobeFormat
+}
+
+/**
+ * Probe media file metadata using ffprobe with structured JSON output.
+ * Much faster and more reliable than parsing ffmpeg stderr.
+ *
+ * @param filePath Absolute path to media file (must be validated first)
+ * @returns Promise resolving to parsed ffprobe JSON data
+ */
+async function probeMediaMetadata(filePath: string): Promise<FFprobeResult> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      '-v', 'quiet',
+      '-print_format', 'json',
+      '-show_streams',
+      '-show_format',
+      filePath
+    ]
+
+    console.log('[ffprobe] Probing:', filePath)
+    const proc = spawn('ffprobe', args)
+
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString()
+    })
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffprobe exited with code ${code}: ${stderr}`))
+        return
+      }
+
+      try {
+        const result = JSON.parse(stdout) as FFprobeResult
+        console.log('[ffprobe] Found streams:', result.streams.map(s => s.codec_type).join(', '))
+        resolve(result)
+      } catch (err) {
+        reject(new Error(`Failed to parse ffprobe JSON: ${err}`))
+      }
+    })
+
+    proc.on('error', (err) => {
+      reject(new Error(`Failed to spawn ffprobe: ${err.message}`))
+    })
+  })
+}
 
 /**
  * Get the application's temporary directory for preview files.
@@ -98,11 +289,12 @@ function createWindow() {
 }
 
 // Register custom protocol for serving local files to renderer
+// Note: bypassCSP is NOT needed for media playback via <video> src
+// stream + supportFetchAPI are sufficient for video streaming with range requests
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'appfile',
     privileges: {
-      bypassCSP: true,
       stream: true,
       supportFetchAPI: true
     }
@@ -152,8 +344,23 @@ app.on('activate', () => {
   }
 })
 
-// Cleanup temp directory on app quit
+// Cleanup on app quit: kill all FFmpeg processes, remove temp directory
 app.on('will-quit', () => {
+  // Clean up all active FFmpeg jobs
+  try {
+    if (activeFFmpegJobs.size > 0) {
+      console.log(`[cleanup] Killing ${activeFFmpegJobs.size} active FFmpeg jobs`)
+      const jobIds = Array.from(activeFFmpegJobs.keys())
+      for (const jobId of jobIds) {
+        cleanupFFmpegJob(jobId)
+      }
+      console.log('[cleanup] All FFmpeg jobs terminated')
+    }
+  } catch (err) {
+    console.error('[cleanup] Failed to clean FFmpeg jobs:', err)
+  }
+
+  // Clean up temp directory
   try {
     if (tmpDir && fs.existsSync(tmpDir)) {
       // Remove all preview files from temp directory
@@ -328,28 +535,256 @@ function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterPar
   return filters.join(',')
 }
 
-function runFFmpeg(args: string[]): Promise<{ success: boolean; stderr: string }> {
-  return new Promise((resolve) => {
-    console.log('Running FFmpeg:', 'ffmpeg', args.join(' '))
+/**
+ * Structured error types for FFmpeg operations
+ */
+enum FFmpegErrorType {
+  SPAWN_FAILED = 'spawn_failed',
+  TIMEOUT = 'timeout',
+  CANCELLED = 'cancelled',
+  NON_ZERO_EXIT = 'non_zero_exit'
+}
 
+interface FFmpegError {
+  type: FFmpegErrorType
+  message: string
+  stderr?: string
+  exitCode?: number
+}
+
+interface FFmpegResult {
+  success: boolean
+  stderr: string
+  error?: FFmpegError
+}
+
+/**
+ * Render attempt strategies (copy → re-encode → last resort)
+ */
+type RenderAttemptType = 'COPY' | 'REENCODE' | 'LAST_RESORT'
+
+interface RenderAttempt {
+  name: RenderAttemptType
+  args: string[]
+}
+
+interface RenderAttemptFailure {
+  attempt: RenderAttemptType
+  error: FFmpegError
+  stderrTail?: string
+}
+
+/**
+ * Get last N lines of stderr for diagnostics (keep small to avoid bloat)
+ */
+function getStderrTail(stderr: string, lines: number = 20): string {
+  const allLines = stderr.split('\n')
+  return allLines.slice(-lines).join('\n')
+}
+
+/**
+ * Map common FFmpeg stderr patterns to user-actionable guidance
+ */
+function diagnoseFFmpegFailure(stderr: string): string | null {
+  const stderrLower = stderr.toLowerCase()
+
+  if (stderrLower.includes('unknown encoder') || stderrLower.includes('encoder not found')) {
+    return 'Missing video codec. FFmpeg may not be built with required encoders.'
+  }
+  if (stderrLower.includes('invalid data found') || stderrLower.includes('moov atom not found')) {
+    return 'File may be corrupt or incomplete.'
+  }
+  if (stderrLower.includes('permission denied') || stderrLower.includes('operation not permitted')) {
+    return 'Permission denied. Check file/directory permissions.'
+  }
+  if (stderrLower.includes('no space left on device') || stderrLower.includes('disk full')) {
+    return 'Disk space full. Free up space and try again.'
+  }
+  if (stderrLower.includes('unsupported codec') || stderrLower.includes('codec not currently supported')) {
+    return 'Input file uses unsupported codec. Try a different file or update FFmpeg.'
+  }
+  if (stderrLower.includes('invalid argument')) {
+    return 'Invalid FFmpeg parameters. This may be a bug.'
+  }
+
+  return null
+}
+
+/**
+ * Try multiple render strategies (copy → re-encode) and collect failures
+ * Returns success result or throws with all attempt failures
+ */
+async function tryRenderStrategies(
+  attempts: RenderAttempt[],
+  context: string
+): Promise<FFmpegResult> {
+  const failures: RenderAttemptFailure[] = []
+
+  for (const attempt of attempts) {
+    try {
+      console.log(`[${context}] Trying ${attempt.name}:`, attempt.args.join(' '))
+      const result = await runFFmpeg(attempt.args)
+      console.log(`[${context}] ${attempt.name} succeeded`)
+      return result
+    } catch (error: any) {
+      console.error(`[${context}] ${attempt.name} failed:`, error.type, error.message)
+
+      // Only retry on NON_ZERO_EXIT (codec/encoding failures)
+      // For TIMEOUT, CANCELLED, SPAWN_FAILED - fail immediately
+      if (error.type !== FFmpegErrorType.NON_ZERO_EXIT) {
+        throw error
+      }
+
+      // Record failure for diagnostics
+      failures.push({
+        attempt: attempt.name,
+        error: error as FFmpegError,
+        stderrTail: error.stderr ? getStderrTail(error.stderr) : undefined
+      })
+
+      // If this was the last attempt, throw comprehensive error
+      if (attempt === attempts[attempts.length - 1]) {
+        const diagnosis = error.stderr ? diagnoseFFmpegFailure(error.stderr) : null
+        const failureList = failures.map(f => `${f.attempt}: ${f.error.message}`).join('; ')
+
+        throw {
+          type: FFmpegErrorType.NON_ZERO_EXIT,
+          message: diagnosis
+            ? `All render attempts failed. ${diagnosis}\nAttempts: ${failureList}`
+            : `All render attempts failed: ${failureList}`,
+          stderr: error.stderr,
+          exitCode: error.exitCode,
+          attempts: failures
+        }
+      }
+
+      // Continue to next attempt
+    }
+  }
+
+  // Should never reach here (loop always returns or throws)
+  throw new Error('No render attempts provided')
+}
+
+/**
+ * Clean up an FFmpeg job: kill process, clear timeout, remove from registry.
+ * Idempotent and safe to call multiple times.
+ */
+function cleanupFFmpegJob(jobId: string): void {
+  const job = activeFFmpegJobs.get(jobId)
+  if (!job) return
+
+  // Clear timeout if exists
+  if (job.timeoutHandle) {
+    clearTimeout(job.timeoutHandle)
+  }
+
+  // Kill process if still running
+  if (job.process && !job.process.killed) {
+    try {
+      job.process.kill('SIGTERM')
+      // Give it a moment, then force kill if needed
+      setTimeout(() => {
+        if (job.process && !job.process.killed) {
+          job.process.kill('SIGKILL')
+        }
+      }, 1000)
+    } catch (err) {
+      console.error('[ffmpeg] Failed to kill process:', err)
+    }
+  }
+
+  // Remove from registry
+  activeFFmpegJobs.delete(jobId)
+  console.log(`[ffmpeg] Cleaned up job ${jobId}, ${activeFFmpegJobs.size} jobs remaining`)
+}
+
+/**
+ * Run FFmpeg with job tracking, timeout enforcement, and guaranteed cleanup.
+ *
+ * @param args FFmpeg command-line arguments
+ * @param timeoutMs Timeout in milliseconds (default: 5 minutes)
+ * @returns Promise that resolves with FFmpeg result or rejects with structured error
+ */
+function runFFmpeg(
+  args: string[],
+  timeoutMs: number = 5 * 60 * 1000
+): Promise<FFmpegResult> {
+  return new Promise((resolve, reject) => {
+    // Generate unique job ID
+    const jobId = `ffmpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`
+
+    console.log(`[ffmpeg] Starting job ${jobId}:`, 'ffmpeg', args.join(' '))
+
+    // Spawn FFmpeg process
     const proc = spawn('ffmpeg', args)
     let stderr = ''
+    let resolved = false
 
+    // Helper to resolve/reject only once
+    const resolveOnce = (result: FFmpegResult) => {
+      if (resolved) return
+      resolved = true
+      cleanupFFmpegJob(jobId)
+      resolve(result)
+    }
+
+    const rejectOnce = (error: FFmpegError) => {
+      if (resolved) return
+      resolved = true
+      cleanupFFmpegJob(jobId)
+      reject(error)
+    }
+
+    // Set up timeout
+    const timeoutHandle = setTimeout(() => {
+      console.error(`[ffmpeg] Job ${jobId} timed out after ${timeoutMs}ms`)
+      rejectOnce({
+        type: FFmpegErrorType.TIMEOUT,
+        message: `FFmpeg operation timed out after ${timeoutMs / 1000}s`,
+        stderr
+      })
+    }, timeoutMs)
+
+    // Register job
+    const job: FFmpegJob = {
+      id: jobId,
+      process: proc,
+      startTime: Date.now(),
+      timeoutHandle
+    }
+    activeFFmpegJobs.set(jobId, job)
+    console.log(`[ffmpeg] Registered job ${jobId}, ${activeFFmpegJobs.size} jobs active`)
+
+    // Capture stderr
     proc.stderr.on('data', (data) => {
       stderr += data.toString()
     })
 
+    // Handle process exit
     proc.on('close', (code) => {
-      resolve({
-        success: code === 0,
-        stderr
-      })
+      const duration = Date.now() - job.startTime
+      console.log(`[ffmpeg] Job ${jobId} exited with code ${code} after ${duration}ms`)
+
+      if (code === 0) {
+        resolveOnce({ success: true, stderr })
+      } else {
+        rejectOnce({
+          type: FFmpegErrorType.NON_ZERO_EXIT,
+          message: `FFmpeg exited with code ${code}`,
+          stderr,
+          exitCode: code
+        })
+      }
     })
 
+    // Handle spawn errors
     proc.on('error', (err) => {
-      resolve({
-        success: false,
-        stderr: `Failed to start FFmpeg: ${err.message}`
+      console.error(`[ffmpeg] Job ${jobId} spawn error:`, err)
+      rejectOnce({
+        type: FFmpegErrorType.SPAWN_FAILED,
+        message: `Failed to start FFmpeg: ${err.message}`,
+        stderr
       })
     })
   })
@@ -358,154 +793,210 @@ function runFFmpeg(args: string[]): Promise<{ success: boolean; stderr: string }
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
   const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction } = options
 
-  // Approve input file for appfile:// protocol access
-  // (Should already be approved from select-file, but ensure it here for defense in depth)
-  approveFilePath(inputPath)
-
-  // Generate unique filenames per render
-  const baseName = path.basename(inputPath, path.extname(inputPath))
-  const renderId = Date.now()
-  const originalOutput = path.join(tmpDir, `${baseName}-original-${renderId}.mp4`)
-  const processedOutput = path.join(tmpDir, `${baseName}-processed-${renderId}.mp4`)
-
-  // Approve output files for appfile:// protocol access
-  approveFilePath(originalOutput)
-  approveFilePath(processedOutput)
-
-  console.log('[render-preview] inputPath:', inputPath)
-  console.log('[render-preview] outputs:', originalOutput, processedOutput)
-
-  // Remove existing files (belt + suspenders)
-  for (const f of [originalOutput, processedOutput]) {
-    if (fs.existsSync(f)) {
-      fs.unlinkSync(f)
+  try {
+    // VALIDATION: Verify input path before any FFmpeg/ffprobe execution
+    const validation = validateMediaPath(inputPath)
+    if (!validation.ok) {
+      console.error('[render-preview] Validation failed:', validation.message)
+      return {
+        success: false,
+        error: `Invalid input file: ${validation.message}`
+      }
     }
-  }
 
-  // Check if input has audio
-  const probeResult = await runFFmpeg([
-    '-i', inputPath,
-    '-hide_banner'
-  ])
+    // Approve input file for appfile:// protocol access
+    // (Should already be approved from select-file, but ensure it here for defense in depth)
+    approveFilePath(inputPath)
 
-  if (!probeResult.stderr.includes('Audio:')) {
+    // Generate unique filenames per render
+    const baseName = path.basename(inputPath, path.extname(inputPath))
+    const renderId = Date.now()
+    const originalOutput = path.join(tmpDir, `${baseName}-original-${renderId}.mp4`)
+    const processedOutput = path.join(tmpDir, `${baseName}-processed-${renderId}.mp4`)
+
+    // Approve output files for appfile:// protocol access
+    approveFilePath(originalOutput)
+    approveFilePath(processedOutput)
+
+    console.log('[render-preview] inputPath:', inputPath)
+    console.log('[render-preview] outputs:', originalOutput, processedOutput)
+
+    // Remove existing files (belt + suspenders)
+    for (const f of [originalOutput, processedOutput]) {
+      if (fs.existsSync(f)) {
+        fs.unlinkSync(f)
+      }
+    }
+
+    // PROBE: Check if input has audio using ffprobe (structured JSON output)
+    let metadata: FFprobeResult
+    try {
+      metadata = await probeMediaMetadata(inputPath)
+    } catch (err: any) {
+      console.error('[render-preview] Probe failed:', err)
+      return {
+        success: false,
+        error: `Failed to probe media file: ${err.message}`
+      }
+    }
+
+    // Check for audio streams
+    const hasAudio = metadata.streams.some(stream => stream.codec_type === 'audio')
+    if (!hasAudio) {
+      return {
+        success: false,
+        error: 'Input file has no audio stream. Cannot apply EQ.'
+      }
+    }
+
+    // Render original preview with automatic copy → re-encode fallback
+    const originalAttempts: RenderAttempt[] = [
+      {
+        name: 'COPY',
+        args: [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          originalOutput
+        ]
+      },
+      {
+        name: 'REENCODE',
+        args: [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          originalOutput
+        ]
+      }
+    ]
+
+    await tryRenderStrategies(originalAttempts, 'original-preview')
+
+    // Render processed preview with full filter chain (HPF -> EQ -> LPF -> Compressor)
+    const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction)
+
+    // Build attempts with automatic copy → re-encode fallback
+    const processedAttempts: RenderAttempt[] = [
+      {
+        name: 'COPY',
+        args: filterChain ? [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'copy',
+          '-af', filterChain,
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ] : [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ]
+      },
+      {
+        name: 'REENCODE',
+        args: filterChain ? [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-af', filterChain,
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ] : [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ]
+      }
+    ]
+
+    await tryRenderStrategies(processedAttempts, 'processed-preview')
+
+    console.log('[render-preview] complete:', originalOutput, processedOutput)
+
+    return {
+      success: true,
+      originalPath: originalOutput,
+      processedPath: processedOutput,
+      renderId
+    }
+  } catch (error: any) {
+    console.error('[render-preview] FFmpeg error:', error)
+
+    // Handle different error types
+    let errorMessage: string
+    if (error.type === FFmpegErrorType.TIMEOUT) {
+      errorMessage = 'Render operation timed out. Try a shorter clip or simpler filters.'
+    } else if (error.type === FFmpegErrorType.CANCELLED) {
+      errorMessage = 'Render operation was cancelled.'
+    } else if (error.type === FFmpegErrorType.SPAWN_FAILED) {
+      errorMessage = `Failed to start FFmpeg: ${error.message}`
+    } else if (error.type === FFmpegErrorType.NON_ZERO_EXIT) {
+      errorMessage = `FFmpeg failed: ${error.message}\n${error.stderr || ''}`
+    } else {
+      errorMessage = `Unexpected error: ${error.message || error}`
+    }
+
     return {
       success: false,
-      error: 'Input file has no audio stream. Cannot apply EQ.'
+      error: errorMessage
     }
-  }
-
-  // Render original preview (copy streams where possible)
-  const originalArgs = [
-    '-y',
-    '-ss', startTime.toString(),
-    '-t', duration.toString(),
-    '-i', inputPath,
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '192k',
-    originalOutput
-  ]
-
-  const origResult = await runFFmpeg(originalArgs)
-  if (!origResult.success) {
-    // Try re-encoding video if copy fails
-    const fallbackArgs = [
-      '-y',
-      '-ss', startTime.toString(),
-      '-t', duration.toString(),
-      '-i', inputPath,
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      originalOutput
-    ]
-    const fallbackResult = await runFFmpeg(fallbackArgs)
-    if (!fallbackResult.success) {
-      return {
-        success: false,
-        error: `Failed to render original preview:\n${fallbackResult.stderr}`
-      }
-    }
-  }
-
-  // Render processed preview with full filter chain (HPF -> EQ -> LPF -> Compressor)
-  const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction)
-
-  let processedArgs: string[]
-  if (filterChain) {
-    processedArgs = [
-      '-y',
-      '-ss', startTime.toString(),
-      '-t', duration.toString(),
-      '-i', inputPath,
-      '-c:v', 'copy',
-      '-af', filterChain,
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      processedOutput
-    ]
-  } else {
-    // No filters applied, just copy
-    processedArgs = [
-      '-y',
-      '-ss', startTime.toString(),
-      '-t', duration.toString(),
-      '-i', inputPath,
-      '-c:v', 'copy',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      processedOutput
-    ]
-  }
-
-  const procResult = await runFFmpeg(processedArgs)
-  if (!procResult.success) {
-    // Try re-encoding video if copy fails
-    const fallbackArgs = filterChain ? [
-      '-y',
-      '-ss', startTime.toString(),
-      '-t', duration.toString(),
-      '-i', inputPath,
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-af', filterChain,
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      processedOutput
-    ] : [
-      '-y',
-      '-ss', startTime.toString(),
-      '-t', duration.toString(),
-      '-i', inputPath,
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      processedOutput
-    ]
-
-    const fallbackResult = await runFFmpeg(fallbackArgs)
-    if (!fallbackResult.success) {
-      return {
-        success: false,
-        error: `Failed to render processed preview:\n${fallbackResult.stderr}`
-      }
-    }
-  }
-
-  console.log('[render-preview] complete:', originalOutput, processedOutput)
-
-  return {
-    success: true,
-    originalPath: originalOutput,
-    processedPath: processedOutput,
-    renderId
   }
 })
 
 ipcMain.handle('get-file-url', (_event, filePath: string) => {
   // Use custom appfile:// protocol to bypass file:// restrictions in dev mode
   return `appfile://${filePath}`
+})
+
+/**
+ * Cancel an in-progress FFmpeg render.
+ * Returns status of the cancellation attempt.
+ */
+ipcMain.handle('cancel-render', (_event, jobId: string) => {
+  const job = activeFFmpegJobs.get(jobId)
+
+  if (!job) {
+    return {
+      success: false,
+      message: `Job ${jobId} not found or already completed`
+    }
+  }
+
+  console.log(`[ffmpeg] Cancelling job ${jobId}`)
+
+  // Clean up will kill the process
+  cleanupFFmpegJob(jobId)
+
+  return {
+    success: true,
+    message: `Job ${jobId} cancelled successfully`
+  }
 })
