@@ -8,13 +8,17 @@ on:
 jobs:
   security:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: anthropics/claude-code-action@beta
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
+          direct_prompt: |
             Run the security-scanner agent on the changes in this PR/push.
 
             Focus on:
