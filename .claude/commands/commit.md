@@ -10,7 +10,14 @@ Commit current changes with a well-crafted message:
 - Verify only intended changes are staged
 - If nothing staged, ask user what to stage
 
-## 1. Commit
+## 1. Security Scan
+
+- Run security-scanner agent on staged changes
+- Check for: hardcoded credentials, API keys, secrets, SQL/command injection, XSS
+- If CRITICAL issues found, STOP and report to user
+- If warnings or clean, proceed
+
+## 2. Commit
 
 Write a conventional commit message:
 
@@ -22,16 +29,11 @@ Write a conventional commit message:
   - Impact / risk assessment (if significant)
 - Include Claude Code attribution footer
 
-## 2. Push
+## 3. Push
 
 - Always push: `git push -u origin <current-branch>`
 - Do NOT ask for confirmation
 
 ---
 
-**Note**: Security scanning and tests run automatically in GitHub Actions:
-- `security-scan.yml` - Scans for vulnerabilities on PRs
-- `tests.yml` - Runs smoke tests on PRs
-- `code-quality.yml` - Weekly code analysis, files beads
-
-Check GitHub Actions tab for results after push.
+**Note**: Tests run automatically in GitHub Actions (`tests.yml`) on push.
