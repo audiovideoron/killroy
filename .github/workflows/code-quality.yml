@@ -1,10 +1,7 @@
 name: Code Quality Analysis
 
 on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   analyze:
