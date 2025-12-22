@@ -69,11 +69,12 @@ describe('WhisperCppTranscriber', () => {
 
   it('parses word-level timestamps from whisper output', async () => {
     const mockWhisperOutput = {
-      text: 'Hello world test',
-      words: [
-        { word: 'Hello', t0: 0, t1: 50, p: 0.95 },
-        { word: 'world', t0: 50, t1: 100, p: 0.98 },
-        { word: 'test', t0: 100, t1: 150, p: 0.92 }
+      transcription: [
+        {
+          timestamps: { from: '00:00:00,000', to: '00:00:01,500' },
+          offsets: { from: 0, to: 1500 },
+          text: 'Hello world test'
+        }
       ]
     }
 
@@ -96,13 +97,13 @@ describe('WhisperCppTranscriber', () => {
       text: 'Hello',
       start_ms: 0,
       end_ms: 500,
-      confidence: 0.95
+      confidence: 0.9 // Default confidence when not provided by whisper
     })
     expect(result.tokens[1]).toMatchObject({
       text: 'world',
       start_ms: 500,
       end_ms: 1000,
-      confidence: 0.98
+      confidence: 0.9
     })
     expect(result.segments).toBeDefined()
     expect(result.segments.length).toBeGreaterThan(0)
@@ -110,9 +111,12 @@ describe('WhisperCppTranscriber', () => {
 
   it('falls back to segment-level timing when word timestamps unavailable', async () => {
     const mockWhisperOutput = {
-      text: 'Hello world test transcript',
-      segments: [
-        { t0: 0, t1: 200, text: 'Hello world test transcript' }
+      transcription: [
+        {
+          timestamps: { from: '00:00:00,000', to: '00:00:02,000' },
+          offsets: { from: 0, to: 2000 },
+          text: 'Hello world test transcript'
+        }
       ]
     }
 
@@ -138,9 +142,12 @@ describe('WhisperCppTranscriber', () => {
 
   it('allocates word timings evenly within segments', async () => {
     const mockWhisperOutput = {
-      text: 'Test transcript',
-      segments: [
-        { t0: 0, t1: 100, text: 'Test transcript' }
+      transcription: [
+        {
+          timestamps: { from: '00:00:00,000', to: '00:00:01,000' },
+          offsets: { from: 0, to: 1000 },
+          text: 'Test transcript'
+        }
       ]
     }
 
@@ -180,8 +187,13 @@ describe('WhisperCppTranscriber', () => {
 
   it('invokes whisper.cpp with correct arguments', async () => {
     const mockWhisperOutput = {
-      text: 'Test',
-      words: [{ word: 'Test', t0: 0, t1: 50, p: 0.9 }]
+      transcription: [
+        {
+          timestamps: { from: '00:00:00,000', to: '00:00:00,500' },
+          offsets: { from: 0, to: 500 },
+          text: 'Test'
+        }
+      ]
     }
 
     vi.mocked(runProcess).mockResolvedValue({
@@ -212,10 +224,15 @@ describe('WhisperCppTranscriber', () => {
     )
   })
 
-  it('cleans up temporary output directory', async () => {
+  it('does not clean up temporary output directory', async () => {
     const mockWhisperOutput = {
-      text: 'Test',
-      words: [{ word: 'Test', t0: 0, t1: 50, p: 0.9 }]
+      transcription: [
+        {
+          timestamps: { from: '00:00:00,000', to: '00:00:00,500' },
+          offsets: { from: 0, to: 500 },
+          text: 'Test'
+        }
+      ]
     }
 
     vi.mocked(runProcess).mockResolvedValue({
@@ -231,8 +248,8 @@ describe('WhisperCppTranscriber', () => {
     const transcriber = new WhisperCppTranscriber(mockConfig)
     await transcriber.transcribe('/test/audio.wav', 'video-123')
 
-    // Should cleanup temp files
-    expect(fs.unlinkSync).toHaveBeenCalled()
-    expect(fs.rmdirSync).toHaveBeenCalled()
+    // Should NOT cleanup temp files (intentionally kept for reuse)
+    expect(fs.unlinkSync).not.toHaveBeenCalled()
+    expect(fs.rmdirSync).not.toHaveBeenCalled()
   })
 })
