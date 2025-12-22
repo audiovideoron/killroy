@@ -89,7 +89,7 @@ export function getTranscriber(): ITranscriber {
     // Lazy-load WhisperCppTranscriber to avoid import in tests
     const { WhisperCppTranscriber } = require('./asr/WhisperCppTranscriber')
 
-    const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cpp'
+    const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cli'
     const modelPath = process.env.WHISPER_MODEL || ''
 
     console.log('WHISPER_CPP_BIN:', binPath)
