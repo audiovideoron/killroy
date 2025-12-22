@@ -34,10 +34,8 @@ declare global {
 }
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
-type Mode = 'audio' | 'transcript'
 
 function App() {
-  const [mode, setMode] = useState<Mode>('audio')
   const [filePath, setFilePath] = useState<string | null>(null)
   const [startTime, setStartTime] = useState(0)
   const [duration, setDuration] = useState(15)
@@ -173,17 +171,15 @@ function App() {
     }
   }, [filePath, edl])
 
-  // Load transcript when switching to transcript mode
-  const [, startTransition] = useState(0)
+  // Auto-load transcript when file is selected
   const loadTranscriptRef = useRef(loadTranscript)
   loadTranscriptRef.current = loadTranscript
 
-  const [prevMode, setPrevMode] = useState<Mode>('audio')
-  if (mode !== prevMode) {
-    setPrevMode(mode)
-    if (mode === 'transcript' && filePath && !transcriptCache.has(filePath) && !isTranscriptLoading) {
+  const [prevFilePath, setPrevFilePath] = useState<string | null>(null)
+  if (filePath !== prevFilePath) {
+    setPrevFilePath(filePath)
+    if (filePath && !transcriptCache.has(filePath) && !isTranscriptLoading) {
       // Trigger load on next render
-      startTransition(Date.now())
       setTimeout(() => loadTranscriptRef.current(), 0)
     }
   }
@@ -262,44 +258,10 @@ function App() {
         Kilroy was here
       </div>
 
-      {/* Mode Switcher */}
-      <div style={{ textAlign: 'center', padding: '12px 0', borderBottom: '1px solid #333' }}>
-        <button
-          onClick={() => setMode('audio')}
-          style={{
-            padding: '8px 24px',
-            marginRight: 8,
-            fontSize: 14,
-            fontWeight: mode === 'audio' ? 600 : 400,
-            background: mode === 'audio' ? '#4fc3f7' : '#555',
-            color: mode === 'audio' ? '#000' : '#ccc',
-            border: 'none',
-            borderRadius: 4,
-            cursor: 'pointer'
-          }}
-        >
-          Audio Processing
-        </button>
-        <button
-          onClick={() => setMode('transcript')}
-          style={{
-            padding: '8px 24px',
-            fontSize: 14,
-            fontWeight: mode === 'transcript' ? 600 : 400,
-            background: mode === 'transcript' ? '#4fc3f7' : '#555',
-            color: mode === 'transcript' ? '#000' : '#ccc',
-            border: 'none',
-            borderRadius: 4,
-            cursor: 'pointer'
-          }}
-        >
-          Transcript Editor
-        </button>
-      </div>
-
-      {/* Audio Mode */}
-      {mode === 'audio' && (
-        <>
+      {/* Split View Layout */}
+      <div style={{ display: 'flex', height: 'calc(100vh - 80px)', overflow: 'hidden' }}>
+        {/* Left Pane: Audio Processing */}
+        <div style={{ flex: '0 0 50%', overflowY: 'auto', borderRight: '1px solid #333' }}>
           {/* Source & Preview Range - Compact Row */}
           <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
@@ -680,12 +642,10 @@ function App() {
       <div className="section">
         <video ref={videoRef} controls style={{ width: '100%', maxHeight: 400 }} />
       </div>
-        </>
-      )}
+        </div>
 
-      {/* Transcript Mode */}
-      {mode === 'transcript' && (
-        <div style={{ padding: 20 }}>
+        {/* Right Pane: Transcript Editor */}
+        <div style={{ flex: '0 0 50%', overflowY: 'auto', padding: 20 }}>
           {!filePath && (
             <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
               <p>No media file selected</p>
@@ -735,7 +695,7 @@ function App() {
             />
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }

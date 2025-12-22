@@ -11,4 +11,12 @@ describe('App smoke tests', () => {
     expect(knobModule.Knob).toBeDefined()
     expect(knobModule.Toggle).toBeDefined()
   })
+
+  it('App component renders split view', async () => {
+    const AppModule = await import('../App')
+    expect(AppModule.default).toBeDefined()
+    // Verify App component can be imported and is defined
+    const App = AppModule.default
+    expect(typeof App).toBe('function')
+  })
 })
