@@ -180,17 +180,18 @@ describe('Render strategy failure handling', () => {
 
       const attempts = createAttempts()
 
-      await expect(
-        tryRenderStrategies(attempts, 'test')
-      ).rejects.toMatchObject({
-        type: FFmpegErrorType.NON_ZERO_EXIT,
-        message: expect.stringContaining('All render attempts failed'),
-        message: expect.stringContaining('Missing video codec'),
-        attempts: expect.arrayContaining([
+      try {
+        await tryRenderStrategies(attempts, 'test')
+        throw new Error('Should have thrown error')
+      } catch (err: any) {
+        expect(err.type).toBe(FFmpegErrorType.NON_ZERO_EXIT)
+        expect(err.message).toContain('All render attempts failed')
+        expect(err.message).toContain('Missing video codec')
+        expect(err.attempts).toEqual(expect.arrayContaining([
           expect.objectContaining({ attempt: 'COPY' }),
           expect.objectContaining({ attempt: 'REENCODE' })
-        ])
-      })
+        ]))
+      }
 
       expect(mockRunFFmpeg).toHaveBeenCalledTimes(2)
     })
