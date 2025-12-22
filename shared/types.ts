@@ -49,4 +49,23 @@ export interface RenderResult {
   originalPath?: string
   processedPath?: string
   renderId?: number
+  jobId?: string  // For progress tracking
+}
+
+/**
+ * Job progress state
+ */
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timed_out'
+
+/**
+ * Progress event emitted during FFmpeg job execution
+ */
+export interface JobProgressEvent {
+  jobId: string
+  status: JobStatus
+  percent?: number           // 0..1 when duration is known
+  indeterminate?: boolean    // true when duration is unknown
+  positionSeconds?: number   // Current time position
+  durationSeconds?: number   // Total duration (if known)
+  phase?: string             // e.g., "original-preview", "processed-preview"
 }

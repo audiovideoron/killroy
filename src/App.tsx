@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback } from 'react'
 import { Knob, Toggle } from './components/Knob'
 import { TranscriptEditor } from './components/TranscriptEditor'
+import { JobProgressBanner } from './components/JobProgressBanner'
+import { useJobProgress } from './hooks/useJobProgress'
 import type {
   EQBand,
   FilterParams,
@@ -41,6 +43,9 @@ function App() {
   const [duration, setDuration] = useState(15)
   const [status, setStatus] = useState<Status>('idle')
   const [errorMsg, setErrorMsg] = useState('')
+
+  // Job progress tracking
+  const { currentJob } = useJobProgress()
 
   const [bands, setBands] = useState<EQBand[]>([
     { frequency: 200, gain: 0, q: 1.0, enabled: true },
@@ -244,13 +249,13 @@ function App() {
     }
   }
 
-  const statusClass = status
-  const statusText = {
+  // Build status text for App-level status (non-job-progress states)
+  const statusText = !currentJob ? {
     idle: 'Idle - Select a file and render preview',
-    rendering: 'Rendering preview...',
+    rendering: 'Rendering...',
     done: 'Done - Ready to play A/B',
     error: `Error: ${errorMsg}`
-  }[status]
+  }[status] || 'Idle' : ''
 
   return (
     <div>
@@ -632,9 +637,12 @@ function App() {
           <button onClick={playProcessed} disabled={!processedUrl}>
             Play Processed
           </button>
-          <div className={`status ${statusClass}`} style={{ marginLeft: 12 }}>
-            {statusText}
-          </div>
+          {!currentJob && statusText && (
+            <div className={`status ${status}`} style={{ marginLeft: 12 }}>
+              {statusText}
+            </div>
+          )}
+          <JobProgressBanner currentJob={currentJob} />
         </div>
       </div>
 
