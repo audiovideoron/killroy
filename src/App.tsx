@@ -26,7 +26,7 @@ declare global {
         noiseReduction: NoiseReductionParams
       }) => Promise<RenderResult>
       getFileUrl: (filePath: string) => Promise<string>
-      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1 }>
+      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>
       renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
       saveDialog: (defaultPath: string) => Promise<string | null>
     }
@@ -75,7 +75,7 @@ function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
 
   // Transcript state - cached by file path
-  const [transcriptCache, setTranscriptCache] = useState<Map<string, { transcript: TranscriptV1; edl: EdlV1 }>>(new Map())
+  const [transcriptCache, setTranscriptCache] = useState<Map<string, { transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>>(new Map())
   const [isTranscriptLoading, setIsTranscriptLoading] = useState(false)
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
 
@@ -88,6 +88,7 @@ function App() {
   const currentTranscriptData = filePath ? transcriptCache.get(filePath) : null
   const transcript = currentTranscriptData?.transcript
   const edl = currentTranscriptData?.edl
+  const asrBackend = currentTranscriptData?.asrBackend
 
   const handleSelectFile = async () => {
     const path = await window.electronAPI.selectFile()
@@ -112,6 +113,14 @@ function App() {
 
     try {
       const result = await window.electronAPI.getTranscript(filePath)
+
+      // Log ASR backend and token count for verification
+      console.log('[Transcript Loaded]', {
+        backend: result.asrBackend,
+        tokens: result.transcript.tokens.length,
+        firstTokens: result.transcript.tokens.slice(0, 3).map(t => t.text)
+      })
+
       setTranscriptCache(prev => new Map(prev).set(filePath, result))
     } catch (err) {
       setTranscriptError(String(err))
@@ -122,14 +131,14 @@ function App() {
 
   // Update EDL in cache
   const handleEdlChange = useCallback((newEdl: EdlV1) => {
-    if (!filePath || !transcript) return
+    if (!filePath || !transcript || !asrBackend) return
 
     setTranscriptCache(prev => {
       const newCache = new Map(prev)
-      newCache.set(filePath, { transcript, edl: newEdl })
+      newCache.set(filePath, { transcript, edl: newEdl, asrBackend })
       return newCache
     })
-  }, [filePath, transcript])
+  }, [filePath, transcript, asrBackend])
 
   // Handle export edited video
   const handleExport = useCallback(async () => {
@@ -681,6 +690,21 @@ function App() {
             <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
               <p>No media file selected</p>
               <p style={{ fontSize: 14 }}>Choose a video file using the button above to view its transcript</p>
+            </div>
+          )}
+
+          {/* Mock ASR Warning Banner */}
+          {filePath && asrBackend === 'mock' && !isTranscriptLoading && (
+            <div style={{
+              padding: '12px 16px',
+              background: '#ff9800',
+              color: '#000',
+              borderRadius: 4,
+              marginBottom: 16,
+              fontSize: 14,
+              fontWeight: 500
+            }}>
+              ⚠ Mock transcript in use — Whisper ASR not configured
             </div>
           )}
 

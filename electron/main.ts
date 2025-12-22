@@ -424,7 +424,7 @@ ipcMain.handle('get-file-url', (_event, filePath: string) => {
 })
 
 // Transcript generation handler
-ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1 }> => {
+ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }> => {
   // 1. Extract video metadata to get video_id
   const videoAsset = await extractVideoMetadata(filePath)
 
@@ -451,7 +451,10 @@ ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ tra
       remove_ranges: []
     }
 
-    return { transcript, edl }
+    // 5. Include ASR backend info for UI warning
+    const asrBackend = process.env.ASR_BACKEND || 'mock'
+
+    return { transcript, edl, asrBackend }
   } finally {
     // 5. Cleanup temp audio file
     cleanupAudioFile(audioPath)

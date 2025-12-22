@@ -227,6 +227,7 @@ export function TranscriptEditor({ transcript, edl, onEdlChange, onExport, isExp
           cursor: pointer;
           padding: 2px 0;
           transition: background-color 0.1s;
+          color: #111;
         }
 
         .token:hover:not(.removed) {
@@ -240,7 +241,8 @@ export function TranscriptEditor({ transcript, edl, onEdlChange, onExport, isExp
 
         .token.removed {
           text-decoration: line-through;
-          opacity: 0.4;
+          color: #777;
+          opacity: 0.6;
           cursor: not-allowed;
         }
       `}</style>

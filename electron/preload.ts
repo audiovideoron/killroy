@@ -26,7 +26,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFileUrl: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('get-file-url', filePath),
 
-  getTranscript: (filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1 }> =>
+  getTranscript: (filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }> =>
     ipcRenderer.invoke('get-transcript', filePath),
 
   renderFinal: (filePath: string, edl: EdlV1, outputPath: string): Promise<{ success: boolean; outputPath?: string; error?: string }> =>
