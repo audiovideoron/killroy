@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import { Knob, Toggle } from './components/Knob'
+import { TranscriptEditor } from './components/TranscriptEditor'
 import type {
   EQBand,
   FilterParams,
@@ -7,6 +8,8 @@ import type {
   NoiseReductionParams,
   RenderResult
 } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
+import { v4 as uuidv4 } from 'uuid'
 
 declare global {
   interface Window {
@@ -23,13 +26,16 @@ declare global {
         noiseReduction: NoiseReductionParams
       }) => Promise<RenderResult>
       getFileUrl: (filePath: string) => Promise<string>
+      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1 }>
     }
   }
 }
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
+type Mode = 'audio' | 'transcript'
 
 function App() {
+  const [mode, setMode] = useState<Mode>('audio')
   const [filePath, setFilePath] = useState<string | null>(null)
   const [startTime, setStartTime] = useState(0)
   const [duration, setDuration] = useState(15)
@@ -66,6 +72,16 @@ function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
 
+  // Transcript state - cached by file path
+  const [transcriptCache, setTranscriptCache] = useState<Map<string, { transcript: TranscriptV1; edl: EdlV1 }>>(new Map())
+  const [isTranscriptLoading, setIsTranscriptLoading] = useState(false)
+  const [transcriptError, setTranscriptError] = useState<string | null>(null)
+
+  // Current transcript/edl for active media
+  const currentTranscriptData = filePath ? transcriptCache.get(filePath) : null
+  const transcript = currentTranscriptData?.transcript
+  const edl = currentTranscriptData?.edl
+
   const handleSelectFile = async () => {
     const path = await window.electronAPI.selectFile()
     if (path) {
@@ -74,6 +90,52 @@ function App() {
       setErrorMsg('')
       setOriginalUrl(null)
       setProcessedUrl(null)
+      // Clear transcript error when new file is selected
+      setTranscriptError(null)
+    }
+  }
+
+  // Load transcript for current file
+  const loadTranscript = useCallback(async () => {
+    if (!filePath) return
+    if (transcriptCache.has(filePath)) return // Already cached
+
+    setIsTranscriptLoading(true)
+    setTranscriptError(null)
+
+    try {
+      const result = await window.electronAPI.getTranscript(filePath)
+      setTranscriptCache(prev => new Map(prev).set(filePath, result))
+    } catch (err) {
+      setTranscriptError(String(err))
+    } finally {
+      setIsTranscriptLoading(false)
+    }
+  }, [filePath, transcriptCache])
+
+  // Update EDL in cache
+  const handleEdlChange = useCallback((newEdl: EdlV1) => {
+    if (!filePath || !transcript) return
+
+    setTranscriptCache(prev => {
+      const newCache = new Map(prev)
+      newCache.set(filePath, { transcript, edl: newEdl })
+      return newCache
+    })
+  }, [filePath, transcript])
+
+  // Load transcript when switching to transcript mode
+  const [, startTransition] = useState(0)
+  const loadTranscriptRef = useRef(loadTranscript)
+  loadTranscriptRef.current = loadTranscript
+
+  const [prevMode, setPrevMode] = useState<Mode>('audio')
+  if (mode !== prevMode) {
+    setPrevMode(mode)
+    if (mode === 'transcript' && filePath && !transcriptCache.has(filePath) && !isTranscriptLoading) {
+      // Trigger load on next render
+      startTransition(Date.now())
+      setTimeout(() => loadTranscriptRef.current(), 0)
     }
   }
 
@@ -151,8 +213,46 @@ function App() {
         Kilroy was here
       </div>
 
-      {/* Source & Preview Range - Compact Row */}
-      <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
+      {/* Mode Switcher */}
+      <div style={{ textAlign: 'center', padding: '12px 0', borderBottom: '1px solid #333' }}>
+        <button
+          onClick={() => setMode('audio')}
+          style={{
+            padding: '8px 24px',
+            marginRight: 8,
+            fontSize: 14,
+            fontWeight: mode === 'audio' ? 600 : 400,
+            background: mode === 'audio' ? '#4fc3f7' : '#555',
+            color: mode === 'audio' ? '#000' : '#ccc',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer'
+          }}
+        >
+          Audio Processing
+        </button>
+        <button
+          onClick={() => setMode('transcript')}
+          style={{
+            padding: '8px 24px',
+            fontSize: 14,
+            fontWeight: mode === 'transcript' ? 600 : 400,
+            background: mode === 'transcript' ? '#4fc3f7' : '#555',
+            color: mode === 'transcript' ? '#000' : '#ccc',
+            border: 'none',
+            borderRadius: 4,
+            cursor: 'pointer'
+          }}
+        >
+          Transcript Editor
+        </button>
+      </div>
+
+      {/* Audio Mode */}
+      {mode === 'audio' && (
+        <>
+          {/* Source & Preview Range - Compact Row */}
+          <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
           <button onClick={handleSelectFile}>Choose Video...</button>
           {filePath && <div className="file-path" style={{ maxWidth: 300 }}>{filePath.split('/').pop()}</div>}
@@ -531,6 +631,43 @@ function App() {
       <div className="section">
         <video ref={videoRef} controls style={{ width: '100%', maxHeight: 400 }} />
       </div>
+        </>
+      )}
+
+      {/* Transcript Mode */}
+      {mode === 'transcript' && (
+        <div style={{ padding: 20 }}>
+          {!filePath && (
+            <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
+              <p>No media file selected</p>
+              <p style={{ fontSize: 14 }}>Choose a video file using the button above to view its transcript</p>
+            </div>
+          )}
+
+          {filePath && isTranscriptLoading && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ fontSize: 18, marginBottom: 12 }}>Transcribing audio...</div>
+              <div style={{ fontSize: 14, color: '#888' }}>This may take a moment</div>
+            </div>
+          )}
+
+          {filePath && transcriptError && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ fontSize: 18, color: '#f44', marginBottom: 12 }}>Error loading transcript</div>
+              <div style={{ fontSize: 14, color: '#888', marginBottom: 20 }}>{transcriptError}</div>
+              <button onClick={loadTranscript}>Retry</button>
+            </div>
+          )}
+
+          {filePath && transcript && edl && !isTranscriptLoading && !transcriptError && (
+            <TranscriptEditor
+              transcript={transcript}
+              edl={edl}
+              onEdlChange={handleEdlChange}
+            />
+          )}
+        </div>
+      )}
     </div>
   )
 }

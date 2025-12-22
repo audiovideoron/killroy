@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { RenderOptions, RenderResult } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 
 // Re-export types for backwards compatibility
 export type {
@@ -11,6 +12,11 @@ export type {
   RenderResult
 } from '../shared/types'
 
+export type {
+  TranscriptV1,
+  EdlV1
+} from '../shared/editor-types'
+
 contextBridge.exposeInMainWorld('electronAPI', {
   selectFile: (): Promise<string | null> => ipcRenderer.invoke('select-file'),
 
@@ -18,5 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('render-preview', options),
 
   getFileUrl: (filePath: string): Promise<string> =>
-    ipcRenderer.invoke('get-file-url', filePath)
+    ipcRenderer.invoke('get-file-url', filePath),
+
+  getTranscript: (filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1 }> =>
+    ipcRenderer.invoke('get-transcript', filePath)
 })

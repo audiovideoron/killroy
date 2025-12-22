@@ -10,6 +10,10 @@ import type {
   NoiseReductionParams,
   RenderOptions
 } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
+import { extractVideoMetadata } from './media-metadata'
+import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
+import { getTranscriber } from './asr-adapter'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -403,4 +407,39 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 ipcMain.handle('get-file-url', (_event, filePath: string) => {
   // Use custom appfile:// protocol to bypass file:// restrictions in dev mode
   return `appfile://${filePath}`
+})
+
+// Transcript generation handler
+ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1 }> => {
+  // 1. Extract video metadata to get video_id
+  const videoAsset = await extractVideoMetadata(filePath)
+
+  // 2. Extract audio for ASR
+  const audioPath = await extractAudioForASR(filePath, tmpDir)
+
+  try {
+    // 3. Run ASR
+    const transcriber = getTranscriber()
+    const transcript = await transcriber.transcribe(audioPath, videoAsset.video_id)
+
+    // 4. Create initial EDL for this media
+    const edl: EdlV1 = {
+      version: '1',
+      video_id: videoAsset.video_id,
+      edl_version_id: `edl-initial-${Date.now()}`,
+      created_at: new Date().toISOString(),
+      params: {
+        merge_threshold_ms: 80,
+        pre_roll_ms: 40,
+        post_roll_ms: 40,
+        audio_crossfade_ms: 12
+      },
+      remove_ranges: []
+    }
+
+    return { transcript, edl }
+  } finally {
+    // 5. Cleanup temp audio file
+    cleanupAudioFile(audioPath)
+  }
 })
