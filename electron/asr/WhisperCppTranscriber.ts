@@ -145,14 +145,10 @@ export class WhisperCppTranscriber {
       // Convert to TranscriptV1
       return this.convertToTranscriptV1(whisperOutput, videoId)
     } finally {
-      // Cleanup output directory
-      if (fs.existsSync(outputDir)) {
-        const files = fs.readdirSync(outputDir)
-        for (const file of files) {
-          fs.unlinkSync(path.join(outputDir, file))
-        }
-        fs.rmdirSync(outputDir)
-      }
+      // Note: We intentionally do NOT clean up the output directory here
+      // because subsequent calls may reuse it, and premature cleanup causes
+      // race conditions when multiple transcript requests are made.
+      // The tmp directory will be reused/overwritten on next run.
     }
   }
 
