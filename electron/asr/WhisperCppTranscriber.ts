@@ -17,25 +17,28 @@ export interface WhisperCppConfig {
 }
 
 /**
- * Whisper.cpp word-level timestamp output format
+ * Whisper.cpp JSON output format (from whisper-cli -oj)
  */
-interface WhisperWord {
-  t0: number // Start time in centiseconds (100th of second)
-  t1: number // End time in centiseconds
-  word: string
-  p: number // Probability/confidence
-}
-
-interface WhisperSegment {
-  t0: number
-  t1: number
+interface WhisperTranscriptionSegment {
+  timestamps: {
+    from: string // "00:00:00,000"
+    to: string   // "00:00:03,490"
+  }
+  offsets: {
+    from: number // milliseconds
+    to: number   // milliseconds
+  }
   text: string
 }
 
 interface WhisperOutput {
-  text: string
-  segments?: WhisperSegment[]
-  words?: WhisperWord[]
+  systeminfo?: string
+  model?: Record<string, unknown>
+  params?: Record<string, unknown>
+  result?: {
+    language: string
+  }
+  transcription: WhisperTranscriptionSegment[]
 }
 
 /**
@@ -84,25 +87,47 @@ export class WhisperCppTranscriber {
         '-of', outputBase // Output file base (will add .json)
       ]
 
+      console.log('[WhisperCpp] Running command:', this.config.binPath, args.join(' '))
+
       const result = await runProcess(this.config.binPath, args, {
         timeout: 600000 // 10 minute timeout for long audio
       })
 
+      console.log('[WhisperCpp] Process exit code:', result.exitCode)
+      console.log('[WhisperCpp] STDOUT:', result.stdout?.substring(0, 500))
+      console.log('[WhisperCpp] STDERR:', result.stderr?.substring(0, 500))
+
       if (!result.success) {
         throw new Error(
-          `Whisper.cpp failed (exit ${result.exitCode}): ${result.stderr || result.error}`
+          `Whisper.cpp failed (exit ${result.exitCode})\nSTDERR:\n${result.stderr}\nSTDOUT:\n${result.stdout}\nERROR:\n${result.error || 'none'}`
         )
       }
 
       // Read JSON output
       const jsonPath = `${outputBase}.json`
-      if (!fs.existsSync(jsonPath)) {
-        throw new Error(`Whisper output JSON not found at: ${jsonPath}`)
+      console.log('[WhisperCpp] Looking for output at:', jsonPath)
+
+      // List files in output directory for debugging
+      if (fs.existsSync(outputDir)) {
+        const files = fs.readdirSync(outputDir)
+        console.log('[WhisperCpp] Files in output directory:', files)
       }
 
-      const whisperOutput: WhisperOutput = JSON.parse(
-        fs.readFileSync(jsonPath, 'utf8')
-      )
+      if (!fs.existsSync(jsonPath)) {
+        throw new Error(
+          `Whisper output JSON not found at: ${jsonPath}\n` +
+          `Exit code: ${result.exitCode}\n` +
+          `Check output directory: ${outputDir}\n` +
+          `STDOUT: ${result.stdout}\n` +
+          `STDERR: ${result.stderr}`
+        )
+      }
+
+      const jsonContent = fs.readFileSync(jsonPath, 'utf8')
+      console.log('[WhisperCpp] JSON content length:', jsonContent.length)
+      console.log('[WhisperCpp] JSON preview:', jsonContent.substring(0, 200))
+
+      const whisperOutput: WhisperOutput = JSON.parse(jsonContent)
 
       // Convert to TranscriptV1
       return this.convertToTranscriptV1(whisperOutput, videoId)
@@ -119,72 +144,52 @@ export class WhisperCppTranscriber {
   }
 
   /**
-   * Convert whisper.cpp output to TranscriptV1 format
+   * Convert whisper-cli JSON output to TranscriptV1 format
    */
   private convertToTranscriptV1(
     whisperOutput: WhisperOutput,
     videoId: string
   ): TranscriptV1 {
-    let tokens: TranscriptToken[]
-    let segments: TranscriptSegment[]
+    console.log('[WhisperCpp] Converting to TranscriptV1, segments:', whisperOutput.transcription?.length)
 
-    // If whisper provided word-level timestamps, use them directly
-    if (whisperOutput.words && whisperOutput.words.length > 0) {
-      tokens = whisperOutput.words.map((w) => ({
-        token_id: uuidv4(),
-        text: w.word.trim(),
-        start_ms: Math.round(w.t0 * 10), // centiseconds to milliseconds
-        end_ms: Math.round(w.t1 * 10),
-        confidence: w.p
-      }))
+    if (!whisperOutput.transcription || whisperOutput.transcription.length === 0) {
+      throw new Error('Whisper output contains no transcription segments')
+    }
 
-      // Group tokens into segments (every 10 words or by natural breaks)
-      segments = this.groupTokensIntoSegments(tokens)
-    } else if (whisperOutput.segments && whisperOutput.segments.length > 0) {
-      // Fall back to segment-level: split text into words and allocate timing
-      const allTokens: TranscriptToken[] = []
-      segments = []
+    const allTokens: TranscriptToken[] = []
+    const segments: TranscriptSegment[] = []
 
-      for (const seg of whisperOutput.segments) {
-        const words = this.splitIntoWords(seg.text)
-        const segmentTokens = this.allocateWordTimings(
-          words,
-          Math.round(seg.t0 * 10),
-          Math.round(seg.t1 * 10)
-        )
-
-        allTokens.push(...segmentTokens)
-
-        segments.push({
-          segment_id: uuidv4(),
-          start_ms: Math.round(seg.t0 * 10),
-          end_ms: Math.round(seg.t1 * 10),
-          text: seg.text.trim(),
-          token_ids: segmentTokens.map((t) => t.token_id)
-        })
+    // Process each transcription segment from whisper-cli
+    for (const seg of whisperOutput.transcription) {
+      // Skip empty segments
+      if (!seg.text || seg.text.trim().length === 0) {
+        continue
       }
 
-      tokens = allTokens
-    } else {
-      // Fallback: single segment with full text
-      const words = this.splitIntoWords(whisperOutput.text)
-      tokens = this.allocateWordTimings(words, 0, 10000) // Assume 10 seconds
+      const start_ms = seg.offsets.from
+      const end_ms = seg.offsets.to
 
-      segments = [
-        {
-          segment_id: uuidv4(),
-          start_ms: 0,
-          end_ms: 10000,
-          text: whisperOutput.text.trim(),
-          token_ids: tokens.map((t) => t.token_id)
-        }
-      ]
+      // Split segment text into words and allocate timing
+      const words = this.splitIntoWords(seg.text)
+      const segmentTokens = this.allocateWordTimings(words, start_ms, end_ms)
+
+      allTokens.push(...segmentTokens)
+
+      segments.push({
+        segment_id: uuidv4(),
+        start_ms,
+        end_ms,
+        text: seg.text.trim(),
+        token_ids: segmentTokens.map((t) => t.token_id)
+      })
     }
+
+    console.log('[WhisperCpp] Converted to', allTokens.length, 'tokens,', segments.length, 'segments')
 
     return {
       version: '1',
       video_id: videoId,
-      tokens,
+      tokens: allTokens,
       segments
     }
   }
@@ -219,28 +224,4 @@ export class WhisperCppTranscriber {
     }))
   }
 
-  /**
-   * Group tokens into segments (every 10 words or natural breaks)
-   */
-  private groupTokensIntoSegments(tokens: TranscriptToken[]): TranscriptSegment[] {
-    const segments: TranscriptSegment[] = []
-    const wordsPerSegment = 10
-
-    for (let i = 0; i < tokens.length; i += wordsPerSegment) {
-      const segmentTokens = tokens.slice(i, i + wordsPerSegment)
-      const start_ms = segmentTokens[0].start_ms
-      const end_ms = segmentTokens[segmentTokens.length - 1].end_ms
-      const text = segmentTokens.map((t) => t.text).join(' ')
-
-      segments.push({
-        segment_id: uuidv4(),
-        start_ms,
-        end_ms,
-        text,
-        token_ids: segmentTokens.map((t) => t.token_id)
-      })
-    }
-
-    return segments
-  }
 }
