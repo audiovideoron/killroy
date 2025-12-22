@@ -103,27 +103,40 @@ export class WhisperCppTranscriber {
         )
       }
 
-      // Read JSON output
-      const jsonPath = `${outputBase}.json`
-      console.log('[WhisperCpp] Looking for output at:', jsonPath)
+      // Allow filesystem to flush (whisper may write file asynchronously)
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      // Use consistent path - compute once
+      const transcriptPath = path.join(outputDir, 'transcript.json')
+      console.log('[WhisperCpp] Looking for output at:', transcriptPath)
+      console.log('[WhisperCpp] Output directory exists:', fs.existsSync(outputDir))
 
       // List files in output directory for debugging
       if (fs.existsSync(outputDir)) {
         const files = fs.readdirSync(outputDir)
         console.log('[WhisperCpp] Files in output directory:', files)
+      } else {
+        console.log('[WhisperCpp] ERROR: Output directory does not exist:', outputDir)
       }
 
-      if (!fs.existsSync(jsonPath)) {
+      if (!fs.existsSync(transcriptPath)) {
+        // Extra diagnostic: check parent directory
+        const parentDir = path.dirname(audioPath)
+        console.log('[WhisperCpp] Parent directory:', parentDir)
+        console.log('[WhisperCpp] Parent directory contents:', fs.readdirSync(parentDir))
+
         throw new Error(
-          `Whisper output JSON not found at: ${jsonPath}\n` +
+          `Whisper output JSON not found at: ${transcriptPath}\n` +
           `Exit code: ${result.exitCode}\n` +
-          `Check output directory: ${outputDir}\n` +
+          `Output directory: ${outputDir}\n` +
+          `Output directory exists: ${fs.existsSync(outputDir)}\n` +
+          `Parent directory: ${parentDir}\n` +
           `STDOUT: ${result.stdout}\n` +
           `STDERR: ${result.stderr}`
         )
       }
 
-      const jsonContent = fs.readFileSync(jsonPath, 'utf8')
+      const jsonContent = fs.readFileSync(transcriptPath, 'utf8')
       console.log('[WhisperCpp] JSON content length:', jsonContent.length)
       console.log('[WhisperCpp] JSON preview:', jsonContent.substring(0, 200))
 
