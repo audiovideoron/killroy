@@ -3,11 +3,11 @@
  * Uses same EDL engine as preview
  */
 
-import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
 import type { EdlV1, VideoAsset } from '../shared/editor-types'
 import { buildEffectiveRemoveRanges, invertToKeepRanges, computeEditedDuration } from './edl-engine'
+import { runFFmpeg } from './ffmpeg-runner'
 
 export interface FinalRenderOptions {
   videoAsset: VideoAsset
@@ -113,38 +113,24 @@ async function extractSegment(
   const start_sec = range.start_ms / 1000
   const duration_sec = (range.end_ms - range.start_ms) / 1000
 
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-y',
-      '-ss', start_sec.toString(),
-      '-t', duration_sec.toString(),
-      '-i', inputPath,
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '23',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      outputPath
-    ]
+  const args = [
+    '-y',
+    '-ss', start_sec.toString(),
+    '-t', duration_sec.toString(),
+    '-i', inputPath,
+    '-c:v', 'libx264',
+    '-preset', 'fast',
+    '-crf', '23',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    outputPath
+  ]
 
-    const proc = spawn('ffmpeg', args)
-    let stderr = ''
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString()
-    })
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(`ffmpeg segment extraction failed: ${stderr}`))
-      }
-      resolve()
-    })
-
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn ffmpeg: ${err.message}`))
-    })
-  })
+  try {
+    await runFFmpeg({ args, timeoutMs: 10 * 60 * 1000 })
+  } catch (error: any) {
+    throw new Error(`ffmpeg segment extraction failed: ${error.message}`)
+  }
 }
 
 /**
@@ -162,7 +148,7 @@ async function concatSegments(segmentPaths: string[], outputPath: string): Promi
   const concatContent = segmentPaths.map((p) => `file '${p}'`).join('\n')
   fs.writeFileSync(concatFilePath, concatContent)
 
-  return new Promise((resolve, reject) => {
+  try {
     const args = [
       '-y',
       '-f', 'concat',
@@ -172,27 +158,13 @@ async function concatSegments(segmentPaths: string[], outputPath: string): Promi
       outputPath
     ]
 
-    const proc = spawn('ffmpeg', args)
-    let stderr = ''
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString()
-    })
-
-    proc.on('close', (code) => {
-      // Cleanup concat file
-      if (fs.existsSync(concatFilePath)) {
-        fs.unlinkSync(concatFilePath)
-      }
-
-      if (code !== 0) {
-        return reject(new Error(`ffmpeg concat failed: ${stderr}`))
-      }
-      resolve()
-    })
-
-    proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn ffmpeg: ${err.message}`))
-    })
-  })
+    await runFFmpeg({ args, timeoutMs: 10 * 60 * 1000 })
+  } catch (error: any) {
+    throw new Error(`ffmpeg concat failed: ${error.message}`)
+  } finally {
+    // Always cleanup concat file
+    if (fs.existsSync(concatFilePath)) {
+      fs.unlinkSync(concatFilePath)
+    }
+  }
 }
