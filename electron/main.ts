@@ -10,6 +10,11 @@ import type {
   NoiseReductionParams,
   RenderOptions
 } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
+import { extractVideoMetadata } from './media-metadata'
+import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
+import { getTranscriber } from './asr-adapter'
+import { renderFinal } from './final-render'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -92,6 +97,19 @@ ipcMain.handle('select-file', async () => {
     return null
   }
   return result.filePaths[0]
+})
+
+ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    defaultPath,
+    filters: [
+      { name: 'Video Files', extensions: ['mp4'] }
+    ]
+  })
+  if (result.canceled || !result.filePath) {
+    return null
+  }
+  return result.filePath
 })
 
 function buildEQFilter(bands: EQBand[]): string {
@@ -403,4 +421,67 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 ipcMain.handle('get-file-url', (_event, filePath: string) => {
   // Use custom appfile:// protocol to bypass file:// restrictions in dev mode
   return `appfile://${filePath}`
+})
+
+// Transcript generation handler
+ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }> => {
+  // 1. Extract video metadata to get video_id
+  const videoAsset = await extractVideoMetadata(filePath)
+
+  // 2. Extract audio for ASR
+  const audioPath = await extractAudioForASR(filePath, tmpDir)
+
+  try {
+    // 3. Run ASR
+    const transcriber = getTranscriber()
+    const transcript = await transcriber.transcribe(audioPath, videoAsset.video_id)
+
+    // 4. Create initial EDL for this media
+    const edl: EdlV1 = {
+      version: '1',
+      video_id: videoAsset.video_id,
+      edl_version_id: `edl-initial-${Date.now()}`,
+      created_at: new Date().toISOString(),
+      params: {
+        merge_threshold_ms: 80,
+        pre_roll_ms: 40,
+        post_roll_ms: 40,
+        audio_crossfade_ms: 12
+      },
+      remove_ranges: []
+    }
+
+    // 5. Include ASR backend info for UI warning
+    const asrBackend = process.env.ASR_BACKEND || 'mock'
+
+    return { transcript, edl, asrBackend }
+  } finally {
+    // 5. Cleanup temp audio file
+    cleanupAudioFile(audioPath)
+  }
+})
+
+// Final render handler - exports edited video
+ipcMain.handle('render-final', async (_event, filePath: string, edl: EdlV1, outputPath: string): Promise<{ success: boolean; outputPath?: string; error?: string }> => {
+  try {
+    // 1. Extract video metadata
+    const videoAsset = await extractVideoMetadata(filePath)
+
+    // 2. Render final video
+    const report = await renderFinal({
+      videoAsset,
+      edl,
+      outputPath
+    })
+
+    return {
+      success: true,
+      outputPath: report.output_path
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: String(err)
+    }
+  }
 })

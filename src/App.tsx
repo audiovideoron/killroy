@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import { Knob, Toggle } from './components/Knob'
+import { TranscriptEditor } from './components/TranscriptEditor'
 import type {
   EQBand,
   FilterParams,
@@ -7,6 +8,8 @@ import type {
   NoiseReductionParams,
   RenderResult
 } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
+import { v4 as uuidv4 } from 'uuid'
 
 declare global {
   interface Window {
@@ -23,6 +26,9 @@ declare global {
         noiseReduction: NoiseReductionParams
       }) => Promise<RenderResult>
       getFileUrl: (filePath: string) => Promise<string>
+      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>
+      renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
+      saveDialog: (defaultPath: string) => Promise<string | null>
     }
   }
 }
@@ -66,6 +72,22 @@ function App() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
 
+  // Transcript state - cached by file path
+  const [transcriptCache, setTranscriptCache] = useState<Map<string, { transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>>(new Map())
+  const [isTranscriptLoading, setIsTranscriptLoading] = useState(false)
+  const [transcriptError, setTranscriptError] = useState<string | null>(null)
+
+  // Export state
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
+
+  // Current transcript/edl for active media
+  const currentTranscriptData = filePath ? transcriptCache.get(filePath) : null
+  const transcript = currentTranscriptData?.transcript
+  const edl = currentTranscriptData?.edl
+  const asrBackend = currentTranscriptData?.asrBackend
+
   const handleSelectFile = async () => {
     const path = await window.electronAPI.selectFile()
     if (path) {
@@ -74,6 +96,91 @@ function App() {
       setErrorMsg('')
       setOriginalUrl(null)
       setProcessedUrl(null)
+      // Clear transcript error when new file is selected
+      setTranscriptError(null)
+    }
+  }
+
+  // Load transcript for current file
+  const loadTranscript = useCallback(async () => {
+    if (!filePath) return
+    if (transcriptCache.has(filePath)) return // Already cached
+
+    setIsTranscriptLoading(true)
+    setTranscriptError(null)
+
+    try {
+      const result = await window.electronAPI.getTranscript(filePath)
+
+      // Log ASR backend and token count for verification
+      console.log('[Transcript Loaded]', {
+        backend: result.asrBackend,
+        tokens: result.transcript.tokens.length,
+        firstTokens: result.transcript.tokens.slice(0, 3).map(t => t.text)
+      })
+
+      setTranscriptCache(prev => new Map(prev).set(filePath, result))
+    } catch (err) {
+      setTranscriptError(String(err))
+    } finally {
+      setIsTranscriptLoading(false)
+    }
+  }, [filePath, transcriptCache])
+
+  // Update EDL in cache
+  const handleEdlChange = useCallback((newEdl: EdlV1) => {
+    if (!filePath || !transcript || !asrBackend) return
+
+    setTranscriptCache(prev => {
+      const newCache = new Map(prev)
+      newCache.set(filePath, { transcript, edl: newEdl, asrBackend })
+      return newCache
+    })
+  }, [filePath, transcript, asrBackend])
+
+  // Handle export edited video
+  const handleExport = useCallback(async () => {
+    if (!filePath || !edl) return
+
+    // Clear previous export state
+    setExportError(null)
+    setExportSuccess(null)
+
+    // Generate default output path
+    const baseName = filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || 'video'
+    const defaultPath = `${baseName}-edited.mp4`
+
+    // Show save dialog
+    const outputPath = await window.electronAPI.saveDialog(defaultPath)
+    if (!outputPath) return // User cancelled
+
+    setIsExporting(true)
+
+    try {
+      const result = await window.electronAPI.renderFinal(filePath, edl, outputPath)
+
+      if (result.success) {
+        setExportSuccess(result.outputPath || outputPath)
+      } else {
+        setExportError(result.error || 'Export failed')
+      }
+    } catch (err) {
+      setExportError(String(err))
+    } finally {
+      setIsExporting(false)
+    }
+  }, [filePath, edl])
+
+  // Auto-load transcript when file is selected
+  const loadTranscriptRef = useRef(loadTranscript)
+  loadTranscriptRef.current = loadTranscript
+
+  const [prevFilePath, setPrevFilePath] = useState<string | null>(null)
+  if (filePath !== prevFilePath) {
+    setPrevFilePath(filePath)
+    if (filePath && !transcriptCache.has(filePath) && !isTranscriptLoading) {
+      // Trigger load on next render
+      setTimeout(() => loadTranscriptRef.current(), 0)
     }
   }
 
@@ -151,8 +258,12 @@ function App() {
         Kilroy was here
       </div>
 
-      {/* Source & Preview Range - Compact Row */}
-      <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
+      {/* Split View Layout */}
+      <div style={{ display: 'flex', height: 'calc(100vh - 80px)', overflow: 'hidden' }}>
+        {/* Left Pane: Audio Processing */}
+        <div style={{ flex: '0 0 50%', overflowY: 'auto', borderRight: '1px solid #333' }}>
+          {/* Source & Preview Range - Compact Row */}
+          <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
           <button onClick={handleSelectFile}>Choose Video...</button>
           {filePath && <div className="file-path" style={{ maxWidth: 300 }}>{filePath.split('/').pop()}</div>}
@@ -530,6 +641,60 @@ function App() {
       {/* Video Preview */}
       <div className="section">
         <video ref={videoRef} controls style={{ width: '100%', maxHeight: 400 }} />
+      </div>
+        </div>
+
+        {/* Right Pane: Transcript Editor */}
+        <div style={{ flex: '0 0 50%', overflowY: 'auto', padding: 20 }}>
+          {!filePath && (
+            <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
+              <p>No media file selected</p>
+              <p style={{ fontSize: 14 }}>Choose a video file using the button above to view its transcript</p>
+            </div>
+          )}
+
+          {/* Mock ASR Warning Banner */}
+          {filePath && asrBackend === 'mock' && !isTranscriptLoading && (
+            <div style={{
+              padding: '12px 16px',
+              background: '#ff9800',
+              color: '#000',
+              borderRadius: 4,
+              marginBottom: 16,
+              fontSize: 14,
+              fontWeight: 500
+            }}>
+              ⚠ Mock transcript in use — Whisper ASR not configured
+            </div>
+          )}
+
+          {filePath && isTranscriptLoading && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ fontSize: 18, marginBottom: 12 }}>Transcribing audio...</div>
+              <div style={{ fontSize: 14, color: '#888' }}>This may take a moment</div>
+            </div>
+          )}
+
+          {filePath && transcriptError && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ fontSize: 18, color: '#f44', marginBottom: 12 }}>Error loading transcript</div>
+              <div style={{ fontSize: 14, color: '#888', marginBottom: 20 }}>{transcriptError}</div>
+              <button onClick={loadTranscript}>Retry</button>
+            </div>
+          )}
+
+          {filePath && transcript && edl && !isTranscriptLoading && !transcriptError && (
+            <TranscriptEditor
+              transcript={transcript}
+              edl={edl}
+              onEdlChange={handleEdlChange}
+              onExport={handleExport}
+              isExporting={isExporting}
+              exportError={exportError}
+              exportSuccess={exportSuccess}
+            />
+          )}
+        </div>
       </div>
     </div>
   )

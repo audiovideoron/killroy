@@ -15,6 +15,7 @@ A desktop application for real-time audio processing and A/B comparison on video
 
 - **Node.js** 18+
 - **FFmpeg** installed and on PATH (`ffmpeg` command must work in terminal)
+- **Whisper.cpp** (optional, for real transcription) — Install via Homebrew or build from source
 
 ## Installation
 
@@ -47,6 +48,70 @@ Opens the app with hot reload and DevTools.
 ```
 Input → HPF → Noise Reduction → EQ (3 bands) → LPF → Compressor/Limiter → Output
 ```
+
+## Transcript-Driven Editor (ASR)
+
+The app includes a transcript-driven editor that uses ASR (Automatic Speech Recognition) to generate word-level transcripts.
+
+### ASR Backend Configuration
+
+By default, the app uses a **mock transcriber** for deterministic testing. To enable **real Whisper-based transcription**, configure the following environment variables:
+
+```bash
+# Enable Whisper.cpp transcriber
+export ASR_BACKEND=whispercpp
+
+# Path to whisper.cpp main binary (default: /opt/homebrew/bin/whisper-cpp)
+export WHISPER_CPP_BIN=/path/to/whisper.cpp/main
+
+# REQUIRED: Path to GGML model file
+export WHISPER_MODEL=/path/to/ggml-base.bin
+
+# Optional: Number of threads (default: 4)
+export WHISPER_THREADS=8
+
+# Optional: Language code (default: en)
+export WHISPER_LANGUAGE=en
+```
+
+### Installing Whisper.cpp
+
+**Option 1: Homebrew (macOS)**
+```bash
+brew install whisper-cpp
+```
+
+**Option 2: Build from source**
+```bash
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+make
+
+# Download a model (e.g., base)
+bash ./models/download-ggml-model.sh base
+```
+
+After installation, set `WHISPER_CPP_BIN` to the path of the `main` binary and `WHISPER_MODEL` to the path of your chosen GGML model file (e.g., `models/ggml-base.bin`).
+
+### Recommended Models
+
+- **ggml-tiny.bin** — Fastest, lower accuracy (~75 MB)
+- **ggml-base.bin** — Good balance (~150 MB) **← Recommended for development**
+- **ggml-small.bin** — Better accuracy, slower (~500 MB)
+- **ggml-medium.bin** — High accuracy, much slower (~1.5 GB)
+
+### Using the Transcript Editor
+
+1. Launch the app: `npm run dev`
+2. Click **"Choose Video..."** and select a video file
+3. Click **"Transcript Editor"** mode switcher
+4. The app will:
+   - Extract audio from the video
+   - Run Whisper.cpp to generate word-level timestamps
+   - Display the transcript for editing
+5. Click words to select them, then click **"Delete Selected"** to remove from the edited video
+
+Transcripts are **cached per file** — switching modes will not re-run ASR.
 
 ## Output Files
 
