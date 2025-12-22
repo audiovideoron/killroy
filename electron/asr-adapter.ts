@@ -82,6 +82,9 @@ export class MockTranscriber implements ITranscriber {
 export function getTranscriber(): ITranscriber {
   const backend = process.env.ASR_BACKEND || 'mock'
 
+  console.log('=== ASR BACKEND INITIALIZATION ===')
+  console.log('ASR_BACKEND:', backend)
+
   if (backend === 'whispercpp') {
     // Lazy-load WhisperCppTranscriber to avoid import in tests
     const { WhisperCppTranscriber } = require('./asr/WhisperCppTranscriber')
@@ -89,12 +92,16 @@ export function getTranscriber(): ITranscriber {
     const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cpp'
     const modelPath = process.env.WHISPER_MODEL || ''
 
+    console.log('WHISPER_CPP_BIN:', binPath)
+    console.log('WHISPER_MODEL:', modelPath)
+
     if (!modelPath) {
-      throw new Error(
-        'WHISPER_MODEL environment variable must be set when using ASR_BACKEND=whispercpp'
-      )
+      const error = 'WHISPER_MODEL environment variable must be set when using ASR_BACKEND=whispercpp'
+      console.error('ERROR:', error)
+      throw new Error(error)
     }
 
+    console.log('✓ Using WhisperCppTranscriber')
     return new WhisperCppTranscriber({
       binPath,
       modelPath,
@@ -104,5 +111,6 @@ export function getTranscriber(): ITranscriber {
   }
 
   // Default: mock transcriber
+  console.log('✓ Using MockTranscriber (default)')
   return new MockTranscriber()
 }

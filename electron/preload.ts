@@ -27,5 +27,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('get-file-url', filePath),
 
   getTranscript: (filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1 }> =>
-    ipcRenderer.invoke('get-transcript', filePath)
+    ipcRenderer.invoke('get-transcript', filePath),
+
+  renderFinal: (filePath: string, edl: EdlV1, outputPath: string): Promise<{ success: boolean; outputPath?: string; error?: string }> =>
+    ipcRenderer.invoke('render-final', filePath, edl, outputPath),
+
+  saveDialog: (defaultPath: string): Promise<string | null> =>
+    ipcRenderer.invoke('save-dialog', defaultPath)
 })

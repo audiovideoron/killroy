@@ -14,6 +14,7 @@ import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 import { extractVideoMetadata } from './media-metadata'
 import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
 import { getTranscriber } from './asr-adapter'
+import { renderFinal } from './final-render'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -96,6 +97,19 @@ ipcMain.handle('select-file', async () => {
     return null
   }
   return result.filePaths[0]
+})
+
+ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    defaultPath,
+    filters: [
+      { name: 'Video Files', extensions: ['mp4'] }
+    ]
+  })
+  if (result.canceled || !result.filePath) {
+    return null
+  }
+  return result.filePath
 })
 
 function buildEQFilter(bands: EQBand[]): string {
@@ -441,5 +455,30 @@ ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ tra
   } finally {
     // 5. Cleanup temp audio file
     cleanupAudioFile(audioPath)
+  }
+})
+
+// Final render handler - exports edited video
+ipcMain.handle('render-final', async (_event, filePath: string, edl: EdlV1, outputPath: string): Promise<{ success: boolean; outputPath?: string; error?: string }> => {
+  try {
+    // 1. Extract video metadata
+    const videoAsset = await extractVideoMetadata(filePath)
+
+    // 2. Render final video
+    const report = await renderFinal({
+      videoAsset,
+      edl,
+      outputPath
+    })
+
+    return {
+      success: true,
+      outputPath: report.output_path
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: String(err)
+    }
   }
 })

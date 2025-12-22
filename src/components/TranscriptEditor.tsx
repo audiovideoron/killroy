@@ -10,9 +10,13 @@ interface TranscriptEditorProps {
   transcript: TranscriptV1
   edl: EdlV1
   onEdlChange: (edl: EdlV1) => void
+  onExport: () => void
+  isExporting: boolean
+  exportError: string | null
+  exportSuccess: string | null
 }
 
-export function TranscriptEditor({ transcript, edl, onEdlChange }: TranscriptEditorProps) {
+export function TranscriptEditor({ transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess }: TranscriptEditorProps) {
   const [selectedTokenIds, setSelectedTokenIds] = useState<Set<string>>(new Set())
 
   // Check if token is removed
@@ -114,7 +118,44 @@ export function TranscriptEditor({ transcript, edl, onEdlChange }: TranscriptEdi
         <span className="edits-count">
           {edl.remove_ranges.length} edit{edl.remove_ranges.length === 1 ? '' : 's'}
         </span>
+        <button
+          onClick={onExport}
+          disabled={isExporting}
+          style={{
+            marginLeft: 'auto',
+            background: '#4fc3f7',
+            color: '#000',
+            fontWeight: 600,
+            border: '1px solid #333'
+          }}
+        >
+          {isExporting ? 'Exporting...' : 'Export Edited Video'}
+        </button>
       </div>
+
+      {exportSuccess && (
+        <div style={{
+          padding: '12px',
+          background: '#4caf50',
+          color: 'white',
+          borderRadius: 4,
+          marginBottom: 16
+        }}>
+          ✓ Exported successfully: {exportSuccess.split('/').pop()}
+        </div>
+      )}
+
+      {exportError && (
+        <div style={{
+          padding: '12px',
+          background: '#f44',
+          color: 'white',
+          borderRadius: 4,
+          marginBottom: 16
+        }}>
+          Export failed: {exportError}
+        </div>
+      )}
 
       <div className="transcript-text">
         {transcript.tokens.map((token) => {

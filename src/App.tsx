@@ -27,6 +27,8 @@ declare global {
       }) => Promise<RenderResult>
       getFileUrl: (filePath: string) => Promise<string>
       getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1 }>
+      renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
+      saveDialog: (defaultPath: string) => Promise<string | null>
     }
   }
 }
@@ -77,6 +79,11 @@ function App() {
   const [isTranscriptLoading, setIsTranscriptLoading] = useState(false)
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
 
+  // Export state
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
+
   // Current transcript/edl for active media
   const currentTranscriptData = filePath ? transcriptCache.get(filePath) : null
   const transcript = currentTranscriptData?.transcript
@@ -123,6 +130,39 @@ function App() {
       return newCache
     })
   }, [filePath, transcript])
+
+  // Handle export edited video
+  const handleExport = useCallback(async () => {
+    if (!filePath || !edl) return
+
+    // Clear previous export state
+    setExportError(null)
+    setExportSuccess(null)
+
+    // Generate default output path
+    const baseName = filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || 'video'
+    const defaultPath = `${baseName}-edited.mp4`
+
+    // Show save dialog
+    const outputPath = await window.electronAPI.saveDialog(defaultPath)
+    if (!outputPath) return // User cancelled
+
+    setIsExporting(true)
+
+    try {
+      const result = await window.electronAPI.renderFinal(filePath, edl, outputPath)
+
+      if (result.success) {
+        setExportSuccess(result.outputPath || outputPath)
+      } else {
+        setExportError(result.error || 'Export failed')
+      }
+    } catch (err) {
+      setExportError(String(err))
+    } finally {
+      setIsExporting(false)
+    }
+  }, [filePath, edl])
 
   // Load transcript when switching to transcript mode
   const [, startTransition] = useState(0)
@@ -664,6 +704,10 @@ function App() {
               transcript={transcript}
               edl={edl}
               onEdlChange={handleEdlChange}
+              onExport={handleExport}
+              isExporting={isExporting}
+              exportError={exportError}
+              exportSuccess={exportSuccess}
             />
           )}
         </div>
