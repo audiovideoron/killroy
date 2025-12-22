@@ -4,6 +4,7 @@
 
 import type { TranscriptV1, TranscriptToken, TranscriptSegment } from '../shared/editor-types'
 import { v4 as uuidv4 } from 'uuid'
+import { WhisperCppTranscriber } from './asr/WhisperCppTranscriber'
 
 /**
  * ASR Transcriber Interface
@@ -86,9 +87,6 @@ export function getTranscriber(): ITranscriber {
   console.log('ASR_BACKEND:', backend)
 
   if (backend === 'whispercpp') {
-    // Lazy-load WhisperCppTranscriber to avoid import in tests
-    const { WhisperCppTranscriber } = require('./asr/WhisperCppTranscriber')
-
     const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cli'
     const modelPath = process.env.WHISPER_MODEL || ''
 
