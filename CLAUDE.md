@@ -96,3 +96,21 @@ bd show <id>  # View issue
 bd close <id> # Complete work
 bd sync       # Sync with git
 ```
+
+## Proactive Issue Discovery
+
+When working in this codebase, create beads for discovered work:
+
+**Create immediately:**
+- Bugs: `bd create "Bug: [description]" --type bug --priority 1`
+- Security issues: `bd create "Security: [description]" --type bug --priority 0`
+- Tech debt: `bd create "Tech debt: [description]" --type task --priority 3`
+
+**Ask user first:**
+- Enhancement ideas, new features, major refactoring
+
+**Don't track:**
+- Issues fixed immediately as part of current work
+- Trivial matters (typos, formatting)
+
+After creating a bead, mention it briefly: "Filed beads-xxx for [issue]"
