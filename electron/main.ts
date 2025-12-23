@@ -37,28 +37,6 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 
-/**
- * DEPRECATED: Use createJobTempDir() instead for per-job isolation.
- * Get the application's temporary directory for preview files.
- * Uses Electron's temp path API to work correctly when packaged.
- * Creates the directory if it doesn't exist.
- *
- * @returns Absolute path to app-specific temp directory
- */
-function getTempDir(): string {
-  // Use Electron's temp directory API (works in dev and packaged app)
-  // Create app-specific subdirectory to avoid conflicts
-  const appTempDir = path.join(app.getPath('temp'), 'audio-pro-previews')
-
-  if (!fs.existsSync(appTempDir)) {
-    fs.mkdirSync(appTempDir, { recursive: true })
-  }
-
-  return appTempDir
-}
-
-// Initialize temp directory (will be created on first access)
-let tmpDir: string
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -86,9 +64,6 @@ function createWindow() {
 registerAppfileScheme()
 
 app.whenReady().then(() => {
-  // Initialize temp directory using Electron's path API
-  tmpDir = getTempDir()
-
   // Clean up stale job directories from previous runs
   cleanupStaleJobDirs()
 
@@ -144,24 +119,8 @@ app.on('will-quit', () => {
     console.error('[cleanup] Failed to clean FFmpeg jobs:', err)
   }
 
-  // Clean up temp directory
-  try {
-    if (tmpDir && fs.existsSync(tmpDir)) {
-      // Remove all preview files from temp directory
-      const files = fs.readdirSync(tmpDir)
-      for (const file of files) {
-        const filePath = path.join(tmpDir, file)
-        if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath)
-        }
-      }
-      // Remove the directory itself
-      fs.rmdirSync(tmpDir)
-      console.log('[cleanup] Removed temp directory:', tmpDir)
-    }
-  } catch (err) {
-    console.error('[cleanup] Failed to clean temp directory:', err)
-  }
+  // Note: Temp directories are now cleaned up via cleanupStaleJobDirs() on startup
+  // and cleanupJobTempDir() after each job completes
 })
 
 // IPC Handlers
@@ -399,15 +358,19 @@ ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ tra
   // 1. Extract video metadata to get video_id
   const videoAsset = await extractVideoMetadata(filePath)
 
-  // 2. Extract audio for ASR
-  const audioPath = await extractAudioForASR(filePath, tmpDir)
+  // 2. Create temp directory for ASR audio extraction
+  const asrJobId = `asr-${Date.now()}-${Math.random().toString(36).substring(7)}`
+  const asrTempDir = createJobTempDir(asrJobId)
+
+  // 3. Extract audio for ASR
+  const audioPath = await extractAudioForASR(filePath, asrTempDir)
 
   try {
-    // 3. Run ASR
+    // 4. Run ASR
     const transcriber = getTranscriber()
     const transcript = await transcriber.transcribe(audioPath, videoAsset.video_id)
 
-    // 4. Create initial EDL for this media
+    // 5. Create initial EDL for this media
     const edl: EdlV1 = {
       version: '1',
       video_id: videoAsset.video_id,
@@ -422,13 +385,14 @@ ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ tra
       remove_ranges: []
     }
 
-    // 5. Include ASR backend info for UI warning
+    // 6. Include ASR backend info for UI warning
     const asrBackend = process.env.ASR_BACKEND || 'mock'
 
     return { transcript, edl, asrBackend }
   } finally {
-    // 5. Cleanup temp audio file
+    // 7. Cleanup temp audio file and job directory
     cleanupAudioFile(audioPath)
+    cleanupJobTempDir(asrJobId)
   }
 })
 
