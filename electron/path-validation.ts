@@ -102,7 +102,9 @@ export function validateMediaPath(filePath: string): PathValidationResult {
 
 // Security: Allowlist of approved file paths for appfile:// protocol
 // Only files explicitly approved (user-selected or app-generated) can be served
-const approvedFilePaths = new Set<string>()
+// Uses LRU cache with bounded size to prevent unbounded memory growth
+const MAX_APPROVED_PATHS = 1000
+const approvedFilePaths = new Map<string, boolean>()
 
 /**
  * Safely resolve and normalize a file path for comparison.
@@ -117,10 +119,26 @@ function normalizePath(filePath: string): string {
 /**
  * Add a file path to the approved list for appfile:// protocol access.
  * Path is normalized to prevent bypasses via different representations.
+ *
+ * Implements LRU eviction: when cache exceeds MAX_APPROVED_PATHS,
+ * the oldest entry is removed.
  */
 export function approveFilePath(filePath: string): void {
   const normalized = normalizePath(filePath)
-  approvedFilePaths.add(normalized)
+
+  // If already exists, delete and re-add to update insertion order (LRU)
+  if (approvedFilePaths.has(normalized)) {
+    approvedFilePaths.delete(normalized)
+  }
+
+  // Evict oldest entry if at capacity
+  if (approvedFilePaths.size >= MAX_APPROVED_PATHS) {
+    const oldestKey = approvedFilePaths.keys().next().value
+    approvedFilePaths.delete(oldestKey)
+    console.log('[security] Evicted oldest approved path:', oldestKey)
+  }
+
+  approvedFilePaths.set(normalized, true)
   console.log('[security] Approved file path:', normalized)
 }
 
