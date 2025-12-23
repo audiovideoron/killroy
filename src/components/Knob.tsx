@@ -36,6 +36,7 @@ export function Knob({
   const isDragging = useRef(false)
   const startY = useRef(0)
   const startValue = useRef(0)
+  const [isFocused, setIsFocused] = useState(false)
 
   // Convert value to normalized 0-1 range
   const valueToNormalized = useCallback((val: number): number => {
@@ -73,6 +74,48 @@ export function Knob({
   const handleDoubleClick = useCallback(() => {
     onChange(defaultValue)
   }, [defaultValue, onChange])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const stepSize = (max - min) * 0.02 // 2% of range
+    const largeStepSize = (max - min) * 0.1 // 10% of range
+
+    let newValue = value
+    let handled = false
+
+    switch (e.key) {
+      case 'ArrowUp':
+      case 'ArrowRight':
+        newValue = Math.min(max, value + stepSize)
+        handled = true
+        break
+      case 'ArrowDown':
+      case 'ArrowLeft':
+        newValue = Math.max(min, value - stepSize)
+        handled = true
+        break
+      case 'Home':
+        newValue = min
+        handled = true
+        break
+      case 'End':
+        newValue = max
+        handled = true
+        break
+      case 'PageUp':
+        newValue = Math.min(max, value + largeStepSize)
+        handled = true
+        break
+      case 'PageDown':
+        newValue = Math.max(min, value - largeStepSize)
+        handled = true
+        break
+    }
+
+    if (handled) {
+      e.preventDefault()
+      onChange(newValue)
+    }
+  }, [value, min, max, onChange])
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -126,7 +169,21 @@ export function Knob({
           height={size}
           onMouseDown={handleMouseDown}
           onDoubleClick={handleDoubleClick}
-          style={{ cursor: 'pointer' }}
+          onKeyDown={handleKeyDown}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          tabIndex={0}
+          role="slider"
+          aria-label={label}
+          aria-valuemin={min}
+          aria-valuemax={max}
+          aria-valuenow={value}
+          style={{
+            cursor: 'pointer',
+            outline: isFocused ? `2px solid ${ringColor}` : 'none',
+            outlineOffset: '2px',
+            borderRadius: '50%'
+          }}
         >
           <defs>
             <radialGradient id={`knobGrad-${size}`} cx="30%" cy="30%">
