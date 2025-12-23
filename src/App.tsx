@@ -1,38 +1,13 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { AudioControls } from './components/AudioControls'
 import { TranscriptPane } from './components/TranscriptPane'
 import { JobProgressBanner } from './components/JobProgressBanner'
+import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview'
+import { SourceControls } from './components/SourceControls'
 import { useJobProgress } from './hooks/useJobProgress'
-import type {
-  EQBand,
-  FilterParams,
-  CompressorParams,
-  NoiseReductionParams,
-  RenderResult
-} from '../shared/types'
+import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
-
-declare global {
-  interface Window {
-    electronAPI: {
-      selectFile: () => Promise<string | null>
-      renderPreview: (options: {
-        inputPath: string
-        startTime: number
-        duration: number
-        bands: EQBand[]
-        hpf: FilterParams
-        lpf: FilterParams
-        compressor: CompressorParams
-        noiseReduction: NoiseReductionParams
-      }) => Promise<RenderResult>
-      getFileUrl: (filePath: string) => Promise<string>
-      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>
-      renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
-      saveDialog: (defaultPath: string) => Promise<string | null>
-    }
-  }
-}
+import './types/electron-api.d'
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
 
@@ -74,7 +49,7 @@ function App() {
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [processedUrl, setProcessedUrl] = useState<string | null>(null)
 
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const videoPreviewRef = useRef<VideoPreviewHandle>(null)
 
   // Transcript state - cached by file path
   const [transcriptCache, setTranscriptCache] = useState<Map<string, { transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>>(new Map())
@@ -151,7 +126,8 @@ function App() {
     setExportSuccess(null)
 
     // Generate default output path
-    const baseName = filePath.split('/').pop()?.replace(/\.[^.]+$/, '') || 'video'
+    // Handle both Unix (/) and Windows (\) path separators
+    const baseName = filePath.split(/[/\\]/).pop()?.replace(/\.[^.]+$/, '') || 'video'
     const defaultPath = `${baseName}-edited.mp4`
 
     // Show save dialog
@@ -176,17 +152,11 @@ function App() {
   }, [filePath, edl])
 
   // Auto-load transcript when file is selected
-  const loadTranscriptRef = useRef(loadTranscript)
-  loadTranscriptRef.current = loadTranscript
-
-  const [prevFilePath, setPrevFilePath] = useState<string | null>(null)
-  if (filePath !== prevFilePath) {
-    setPrevFilePath(filePath)
+  useEffect(() => {
     if (filePath && !transcriptCache.has(filePath) && !isTranscriptLoading) {
-      // Trigger load on next render
-      setTimeout(() => loadTranscriptRef.current(), 0)
+      loadTranscript()
     }
-  }
+  }, [filePath, transcriptCache, isTranscriptLoading, loadTranscript])
 
   const updateBand = (index: number, field: keyof EQBand, value: number | boolean) => {
     setBands(prev => {
@@ -234,19 +204,8 @@ function App() {
     }
   }, [filePath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction])
 
-  const playOriginal = () => {
-    if (videoRef.current && originalUrl) {
-      videoRef.current.src = originalUrl
-      videoRef.current.play()
-    }
-  }
-
-  const playProcessed = () => {
-    if (videoRef.current && processedUrl) {
-      videoRef.current.src = processedUrl
-      videoRef.current.play()
-    }
-  }
+  const playOriginal = () => videoPreviewRef.current?.playOriginal()
+  const playProcessed = () => videoPreviewRef.current?.playProcessed()
 
   // Build status text for App-level status (non-job-progress states)
   const statusText = !currentJob ? {
@@ -267,36 +226,14 @@ function App() {
         {/* Left Pane: Audio Processing */}
         <div style={{ flex: '0 0 50%', overflowY: 'auto', borderRight: '1px solid #333' }}>
           {/* Source & Preview Range - Compact Row */}
-          <div className="section" style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div>
-          <button onClick={handleSelectFile}>Choose Video...</button>
-          {filePath && <div className="file-path" style={{ maxWidth: 300 }}>{filePath.split('/').pop()}</div>}
-        </div>
-        <div style={{ display: 'flex', gap: 16 }}>
-          <div className="field">
-            <span>Start (sec)</span>
-            <input
-              type="number"
-              min={0}
-              value={startTime}
-              onChange={e => setStartTime(Number(e.target.value))}
-              style={{ width: 60 }}
-            />
-          </div>
-          <div className="field">
-            <span>Duration (sec)</span>
-            <input
-              type="number"
-              min={1}
-              max={60}
-              value={duration}
-              onChange={e => setDuration(Number(e.target.value))}
-              style={{ width: 60 }}
-            />
-          </div>
-        </div>
-      </div>
-
+          <SourceControls
+            filePath={filePath}
+            startTime={startTime}
+            duration={duration}
+            onSelectFile={handleSelectFile}
+            onStartTimeChange={setStartTime}
+            onDurationChange={setDuration}
+          />
       {/* Channel Strips Container */}
       <AudioControls
         bands={bands}
@@ -310,7 +247,6 @@ function App() {
         onCompressorChange={setCompressor}
         onNoiseReductionChange={setNoiseReduction}
       />
-
       {/* Render & Playback */}
       <div className="section">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -333,9 +269,7 @@ function App() {
       </div>
 
       {/* Video Preview */}
-      <div className="section">
-        <video ref={videoRef} controls style={{ width: '100%', maxHeight: 400 }} />
-      </div>
+      <VideoPreview ref={videoPreviewRef} originalUrl={originalUrl} processedUrl={processedUrl} />
         </div>
 
         {/* Right Pane: Transcript Editor */}
