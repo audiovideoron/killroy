@@ -398,8 +398,15 @@ export function buildEQFilter(bands: EQBand[]): string {
   // FFmpeg equalizer filter format: equalizer=f=<freq>:t=h:w=<width>:g=<gain>
   // width = frequency / Q for peaking filter
   const filters = enabledBands.map(band => {
-    const width = band.frequency / band.q
-    return `equalizer=f=${band.frequency}:t=h:w=${width}:g=${band.gain}`
+    // Clamp frequency to audible range (20 Hz - 20 kHz)
+    const frequency = Math.max(20, Math.min(20000, band.frequency))
+    // Clamp Q to reasonable range (0.1 - 10)
+    const q = Math.max(0.1, Math.min(10, band.q))
+    // Clamp gain to ±24 dB
+    const gain = Math.max(-24, Math.min(24, band.gain))
+
+    const width = frequency / q
+    return `equalizer=f=${frequency}:t=h:w=${width}:g=${gain}`
   })
 
   return filters.join(',')

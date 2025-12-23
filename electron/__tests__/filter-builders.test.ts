@@ -17,8 +17,15 @@ function buildEQFilter(bands: EQBand[]): string {
   }
 
   const filters = enabledBands.map(band => {
-    const width = band.frequency / band.q
-    return `equalizer=f=${band.frequency}:t=h:w=${width}:g=${band.gain}`
+    // Clamp frequency to audible range (20 Hz - 20 kHz)
+    const frequency = Math.max(20, Math.min(20000, band.frequency))
+    // Clamp Q to reasonable range (0.1 - 10)
+    const q = Math.max(0.1, Math.min(10, band.q))
+    // Clamp gain to ±24 dB
+    const gain = Math.max(-24, Math.min(24, band.gain))
+
+    const width = frequency / q
+    return `equalizer=f=${frequency}:t=h:w=${width}:g=${gain}`
   })
 
   return filters.join(',')
@@ -177,6 +184,126 @@ describe('buildEQFilter', () => {
     const result = buildEQFilter(bands)
     const width = 800 / 1.0
     expect(result).toBe(`equalizer=f=800:t=h:w=${width}:g=-10`)
+  })
+
+  describe('input validation and clamping', () => {
+    it('clamps frequency below 20 Hz to minimum', () => {
+      const bands: EQBand[] = [
+        { frequency: 10, gain: 5, q: 1.0, enabled: true },
+        { frequency: 0, gain: 3, q: 1.0, enabled: true },
+        { frequency: -50, gain: 2, q: 1.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 20 / 1.0
+      expect(result).toBe(
+        `equalizer=f=20:t=h:w=${width}:g=5,equalizer=f=20:t=h:w=${width}:g=3,equalizer=f=20:t=h:w=${width}:g=2`
+      )
+    })
+
+    it('clamps frequency above 20000 Hz to maximum', () => {
+      const bands: EQBand[] = [
+        { frequency: 25000, gain: 5, q: 1.0, enabled: true },
+        { frequency: 100000, gain: 3, q: 1.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 20000 / 1.0
+      expect(result).toBe(
+        `equalizer=f=20000:t=h:w=${width}:g=5,equalizer=f=20000:t=h:w=${width}:g=3`
+      )
+    })
+
+    it('clamps Q below 0.1 to minimum', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: 5, q: 0.05, enabled: true },
+        { frequency: 2000, gain: 3, q: 0, enabled: true },
+        { frequency: 3000, gain: 2, q: -1, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 1000 / 0.1
+      const width2 = 2000 / 0.1
+      const width3 = 3000 / 0.1
+      expect(result).toBe(
+        `equalizer=f=1000:t=h:w=${width}:g=5,equalizer=f=2000:t=h:w=${width2}:g=3,equalizer=f=3000:t=h:w=${width3}:g=2`
+      )
+    })
+
+    it('clamps Q above 10 to maximum', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: 5, q: 15, enabled: true },
+        { frequency: 2000, gain: 3, q: 100, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 1000 / 10
+      const width2 = 2000 / 10
+      expect(result).toBe(
+        `equalizer=f=1000:t=h:w=${width}:g=5,equalizer=f=2000:t=h:w=${width2}:g=3`
+      )
+    })
+
+    it('clamps gain below -24 dB to minimum', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: -30, q: 1.0, enabled: true },
+        { frequency: 2000, gain: -100, q: 1.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 1000 / 1.0
+      const width2 = 2000 / 1.0
+      expect(result).toBe(
+        `equalizer=f=1000:t=h:w=${width}:g=-24,equalizer=f=2000:t=h:w=${width2}:g=-24`
+      )
+    })
+
+    it('clamps gain above +24 dB to maximum', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: 30, q: 1.0, enabled: true },
+        { frequency: 2000, gain: 100, q: 1.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width = 1000 / 1.0
+      const width2 = 2000 / 1.0
+      expect(result).toBe(
+        `equalizer=f=1000:t=h:w=${width}:g=24,equalizer=f=2000:t=h:w=${width2}:g=24`
+      )
+    })
+
+    it('clamps all parameters simultaneously', () => {
+      const bands: EQBand[] = [
+        { frequency: -100, gain: 50, q: -5, enabled: true },
+        { frequency: 50000, gain: -50, q: 20, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width1 = 20 / 0.1
+      const width2 = 20000 / 10
+      expect(result).toBe(
+        `equalizer=f=20:t=h:w=${width1}:g=24,equalizer=f=20000:t=h:w=${width2}:g=-24`
+      )
+    })
+
+    it('allows valid values at edge of ranges', () => {
+      const bands: EQBand[] = [
+        { frequency: 20, gain: 24, q: 10, enabled: true },
+        { frequency: 20000, gain: -24, q: 0.1, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width1 = 20 / 10
+      const width2 = 20000 / 0.1
+      expect(result).toBe(
+        `equalizer=f=20:t=h:w=${width1}:g=24,equalizer=f=20000:t=h:w=${width2}:g=-24`
+      )
+    })
+
+    it('allows valid values within ranges', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: 6, q: 1.5, enabled: true },
+        { frequency: 5000, gain: -12, q: 0.5, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+      const width1 = 1000 / 1.5
+      const width2 = 5000 / 0.5
+      expect(result).toBe(
+        `equalizer=f=1000:t=h:w=${width1}:g=6,equalizer=f=5000:t=h:w=${width2}:g=-12`
+      )
+    })
   })
 })
 
