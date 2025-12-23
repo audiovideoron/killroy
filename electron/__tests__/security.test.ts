@@ -14,13 +14,25 @@ function normalizePath(filePath: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
 }
 
-function createPathValidator() {
-  const approvedPaths = new Set<string>()
+function createPathValidator(maxPaths = 1000) {
+  const approvedPaths = new Map<string, boolean>()
 
   return {
     approvePath: (filePath: string): void => {
       const normalized = normalizePath(filePath)
-      approvedPaths.add(normalized)
+
+      // If already exists, delete and re-add to update insertion order (LRU)
+      if (approvedPaths.has(normalized)) {
+        approvedPaths.delete(normalized)
+      }
+
+      // Evict oldest entry if at capacity
+      if (approvedPaths.size >= maxPaths) {
+        const oldestKey = approvedPaths.keys().next().value
+        approvedPaths.delete(oldestKey)
+      }
+
+      approvedPaths.set(normalized, true)
     },
     validatePath: (requestedPath: string): string | null => {
       try {
@@ -30,7 +42,8 @@ function createPathValidator() {
         return null
       }
     },
-    clear: () => approvedPaths.clear()
+    clear: () => approvedPaths.clear(),
+    size: () => approvedPaths.size
   }
 }
 
@@ -178,6 +191,110 @@ describe('Path validation security', () => {
           expect(validator.validatePath(result)).toBeNull()
         }
       })
+    })
+  })
+
+  describe('LRU cache eviction', () => {
+    it('enforces maximum cache size limit', () => {
+      const maxSize = 10
+      const smallValidator = createPathValidator(maxSize)
+
+      // Add more paths than the limit
+      for (let i = 0; i < 15; i++) {
+        smallValidator.approvePath(`/tmp/video${i}.mp4`)
+      }
+
+      // Cache should not exceed max size
+      expect(smallValidator.size()).toBe(maxSize)
+    })
+
+    it('evicts oldest entries when limit reached', () => {
+      const maxSize = 5
+      const smallValidator = createPathValidator(maxSize)
+
+      // Add paths 0-4
+      for (let i = 0; i < 5; i++) {
+        smallValidator.approvePath(`/tmp/video${i}.mp4`)
+      }
+
+      // All should be approved
+      for (let i = 0; i < 5; i++) {
+        expect(smallValidator.validatePath(`/tmp/video${i}.mp4`)).not.toBeNull()
+      }
+
+      // Add 3 more paths (should evict 0, 1, 2)
+      for (let i = 5; i < 8; i++) {
+        smallValidator.approvePath(`/tmp/video${i}.mp4`)
+      }
+
+      // Oldest paths should be evicted
+      expect(smallValidator.validatePath('/tmp/video0.mp4')).toBeNull()
+      expect(smallValidator.validatePath('/tmp/video1.mp4')).toBeNull()
+      expect(smallValidator.validatePath('/tmp/video2.mp4')).toBeNull()
+
+      // Recent paths should remain
+      expect(smallValidator.validatePath('/tmp/video3.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video4.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video5.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video6.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video7.mp4')).not.toBeNull()
+    })
+
+    it('updates access order when re-approving existing path', () => {
+      const maxSize = 3
+      const smallValidator = createPathValidator(maxSize)
+
+      // Add paths 0, 1, 2
+      smallValidator.approvePath('/tmp/video0.mp4')
+      smallValidator.approvePath('/tmp/video1.mp4')
+      smallValidator.approvePath('/tmp/video2.mp4')
+
+      // Re-approve video0 (should move it to end of queue)
+      smallValidator.approvePath('/tmp/video0.mp4')
+
+      // Add video3 (should evict video1, not video0)
+      smallValidator.approvePath('/tmp/video3.mp4')
+
+      // video1 should be evicted (it's the oldest untouched)
+      expect(smallValidator.validatePath('/tmp/video1.mp4')).toBeNull()
+
+      // video0 should still be valid (was refreshed)
+      expect(smallValidator.validatePath('/tmp/video0.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video2.mp4')).not.toBeNull()
+      expect(smallValidator.validatePath('/tmp/video3.mp4')).not.toBeNull()
+    })
+
+    it('maintains cache size of 1000 by default', () => {
+      const defaultValidator = createPathValidator()
+
+      // Add 1500 paths
+      for (let i = 0; i < 1500; i++) {
+        defaultValidator.approvePath(`/tmp/video${i}.mp4`)
+      }
+
+      // Should cap at 1000
+      expect(defaultValidator.size()).toBe(1000)
+
+      // First 500 should be evicted
+      expect(defaultValidator.validatePath('/tmp/video0.mp4')).toBeNull()
+      expect(defaultValidator.validatePath('/tmp/video499.mp4')).toBeNull()
+
+      // Last 1000 should remain
+      expect(defaultValidator.validatePath('/tmp/video500.mp4')).not.toBeNull()
+      expect(defaultValidator.validatePath('/tmp/video1499.mp4')).not.toBeNull()
+    })
+
+    it('handles single capacity cache correctly', () => {
+      const tinyValidator = createPathValidator(1)
+
+      tinyValidator.approvePath('/tmp/video1.mp4')
+      expect(tinyValidator.validatePath('/tmp/video1.mp4')).not.toBeNull()
+
+      tinyValidator.approvePath('/tmp/video2.mp4')
+      expect(tinyValidator.validatePath('/tmp/video1.mp4')).toBeNull()
+      expect(tinyValidator.validatePath('/tmp/video2.mp4')).not.toBeNull()
+
+      expect(tinyValidator.size()).toBe(1)
     })
   })
 })
