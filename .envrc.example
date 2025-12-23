@@ -1,0 +1,28 @@
+# Kilroy Audio Pro — Environment Configuration Template
+# Copy this file to .envrc and customize paths for your system
+# Requires direnv: brew install direnv
+# After copying, run: direnv allow
+
+# Python virtual environment (uncomment if using Python features)
+# source .venv/bin/activate
+
+# ============================================================
+# ASR (Automatic Speech Recognition) Configuration
+# ============================================================
+
+# Backend: 'mock' (default, fake data) or 'whispercpp' (real transcription)
+export ASR_BACKEND=whispercpp
+
+# REQUIRED when ASR_BACKEND=whispercpp
+# Path to GGML model file — download from:
+# https://huggingface.co/ggerganov/whisper.cpp
+# Example models: ggml-tiny.bin, ggml-base.bin, ggml-small.bin
+export WHISPER_MODEL=/path/to/your/whisper-models/ggml-base.bin
+
+# Path to whisper-cli binary
+# Default shown below works for Homebrew installation: brew install whisper-cpp
+export WHISPER_CPP_BIN=/opt/homebrew/bin/whisper-cli
+
+# Optional: Performance and language tuning
+# export WHISPER_THREADS=8
+# export WHISPER_LANGUAGE=en

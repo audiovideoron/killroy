@@ -9,5 +9,5 @@ media/
 *.mov
 *.mp4
 
-.envrc
+.envrc  # Local env config — copy from .envrc.example
 .DS_Store

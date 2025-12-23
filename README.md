@@ -25,6 +25,39 @@ cd killroy
 npm install
 ```
 
+## First-Time Setup
+
+After cloning, configure ASR (Automatic Speech Recognition):
+
+```bash
+# 1. Copy environment template
+cp .envrc.example .envrc
+
+# 2. Edit .envrc and set WHISPER_MODEL path
+# (Or leave ASR_BACKEND=mock for testing with fake transcripts)
+
+# 3. If using direnv
+direnv allow
+
+# 4. Verify ASR configuration
+npm run asr:check
+```
+
+**Expected output (working):**
+```
+ASR Backend: whispercpp
+Model path: /Users/yourname/whisper-models/ggml-base.bin
+Binary path: /opt/homebrew/bin/whisper-cli
+✓ Model file exists
+✓ Binary exists
+```
+
+**Expected output (mock mode):**
+```
+ASR Backend: mock
+(Using mock backend — no model/binary required)
+```
+
 ## Development
 
 ```bash
@@ -61,8 +94,8 @@ By default, the app uses a **mock transcriber** for deterministic testing. To en
 # Enable Whisper.cpp transcriber
 export ASR_BACKEND=whispercpp
 
-# Path to whisper.cpp main binary (default: /opt/homebrew/bin/whisper-cpp)
-export WHISPER_CPP_BIN=/path/to/whisper.cpp/main
+# Path to whisper-cli binary (default: /opt/homebrew/bin/whisper-cli)
+export WHISPER_CPP_BIN=/opt/homebrew/bin/whisper-cli
 
 # REQUIRED: Path to GGML model file
 export WHISPER_MODEL=/path/to/ggml-base.bin
@@ -91,7 +124,7 @@ make
 bash ./models/download-ggml-model.sh base
 ```
 
-After installation, set `WHISPER_CPP_BIN` to the path of the `main` binary and `WHISPER_MODEL` to the path of your chosen GGML model file (e.g., `models/ggml-base.bin`).
+After installation, set `WHISPER_CPP_BIN` to the path of the `whisper-cli` binary and `WHISPER_MODEL` to the path of your chosen GGML model file (e.g., `models/ggml-base.bin`).
 
 ### Recommended Models
 

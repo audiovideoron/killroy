@@ -92,6 +92,22 @@ app.whenReady().then(() => {
   // Clean up stale job directories from previous runs
   cleanupStaleJobDirs()
 
+  // ASR configuration diagnostic
+  const asrBackend = process.env.ASR_BACKEND || 'mock'
+  console.log(`[ASR] Backend: ${asrBackend}`)
+  if (asrBackend === 'whispercpp') {
+    const modelPath = process.env.WHISPER_MODEL || ''
+    const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cli'
+    const modelExists = modelPath && fs.existsSync(modelPath)
+    const binExists = fs.existsSync(binPath)
+    console.log(`[ASR] Model configured: ${modelExists ? 'YES' : 'NO'}`)
+    console.log(`[ASR] Binary configured: ${binExists ? 'YES' : 'NO'}`)
+    if (!modelExists || !binExists) {
+      console.warn('[ASR] ⚠️  Whisper configuration incomplete — transcription will fail')
+      console.warn('[ASR] Run: npm run asr:check')
+    }
+  }
+
   // Handle appfile:// protocol with Range request support for video playback
   // Security: Only serves files that have been explicitly approved via the allowlist
   setupAppfileProtocolHandler()
