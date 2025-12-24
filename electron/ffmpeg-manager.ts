@@ -7,6 +7,7 @@ import type {
   FilterParams,
   CompressorParams,
   NoiseReductionParams,
+  AutoMixParams,
   JobProgressEvent,
   JobStatus
 } from '../shared/types'
@@ -503,9 +504,41 @@ export function buildNoiseReductionFilter(nr: NoiseReductionParams): string {
 }
 
 /**
+ * Build AutoMix filter using FFmpeg's dynaudnorm for speech-focused level management.
+ *
+ * Tailored for speech/dialogue: meetings, interviews, podcasts.
+ *
+ * dynaudnorm parameters:
+ * - f (framelen): Frame length in ms. Larger = slower response, smoother.
+ * - g (gausssize): Gaussian window size. Larger = slower response.
+ * - p (peak): Target peak level (0.0-1.0). Fixed at 0.9 for headroom.
+ * - m (maxgain): Maximum amplification factor.
+ *
+ * Presets:
+ * - LIGHT: Gentle leveling, preserves natural dynamics (f=800, g=51, m=3)
+ * - MEDIUM: Balanced leveling for typical speech (f=500, g=35, m=6)
+ * - HEAVY: Aggressive leveling for difficult recordings (f=200, g=21, m=10)
+ */
+export function buildAutoMixFilter(autoMix: AutoMixParams): string {
+  if (!autoMix.enabled) return ''
+
+  // Preset parameters for speech-focused leveling
+  const presets = {
+    LIGHT:  { framelen: 800, gausssize: 51, maxgain: 3 },
+    MEDIUM: { framelen: 500, gausssize: 35, maxgain: 6 },
+    HEAVY:  { framelen: 200, gausssize: 21, maxgain: 10 }
+  }
+
+  const params = presets[autoMix.preset]
+  const peak = 0.9
+
+  return `dynaudnorm=f=${params.framelen}:g=${params.gausssize}:p=${peak}:m=${params.maxgain}`
+}
+
+/**
  * Build full audio filter chain
  */
-export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams): string {
+export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix?: AutoMixParams): string {
   const filters: string[] = []
 
   // 1. High-pass filter (if enabled)
@@ -530,7 +563,15 @@ export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: Fi
     filters.push(`lowpass=f=${lpf.frequency}`)
   }
 
-  // 5. Compressor/Limiter (after EQ, before final output)
+  // 5. AutoMix (after cleaned speech, before compressor/limiter)
+  if (autoMix) {
+    const autoMixFilter = buildAutoMixFilter(autoMix)
+    if (autoMixFilter) {
+      filters.push(autoMixFilter)
+    }
+  }
+
+  // 6. Compressor/Limiter (after EQ, before final output)
   const compFilter = buildCompressorFilter(compressor)
   if (compFilter) {
     filters.push(compFilter)

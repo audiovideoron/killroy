@@ -5,7 +5,7 @@ import { JobProgressBanner } from './components/JobProgressBanner'
 import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview'
 import { SourceControls } from './components/SourceControls'
 import { useJobProgress } from './hooks/useJobProgress'
-import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams } from '../shared/types'
+import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoMixParams, AutoMixPreset } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 import './types/electron-api.d'
 
@@ -45,6 +45,56 @@ function App() {
     strength: 50,
     enabled: false
   })
+
+  const [autoMix, setAutoMix] = useState<AutoMixParams>({
+    preset: 'MEDIUM',
+    enabled: false
+  })
+
+  // Handle AutoMix preset selection - configures full processing chain
+  const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
+    // Always enable AutoMix and set the preset
+    setAutoMix({ preset, enabled: true })
+
+    // Configure chain based on preset
+    if (preset === 'LIGHT') {
+      // LIGHT: AutoMix only, disable all other processors
+      setNoiseReduction({ strength: 50, enabled: false })
+      setCompressor(prev => ({ ...prev, enabled: false }))
+      setHpf(prev => ({ ...prev, enabled: false }))
+      setLpf(prev => ({ ...prev, enabled: false }))
+    } else if (preset === 'MEDIUM') {
+      // MEDIUM: AutoMix + NR 25% + Comp (-18dB, 3:1)
+      setNoiseReduction({ strength: 25, enabled: true })
+      setCompressor({
+        threshold: -18,
+        ratio: 3,
+        attack: 10,
+        release: 100,
+        makeup: 0,
+        emphasis: 20,
+        mode: 'COMP',
+        enabled: true
+      })
+      setHpf(prev => ({ ...prev, enabled: false }))
+      setLpf(prev => ({ ...prev, enabled: false }))
+    } else if (preset === 'HEAVY') {
+      // HEAVY: AutoMix + NR 50% + Comp (-15dB, 4:1) + HPF 80Hz
+      setNoiseReduction({ strength: 50, enabled: true })
+      setCompressor({
+        threshold: -15,
+        ratio: 4,
+        attack: 10,
+        release: 100,
+        makeup: 3,
+        emphasis: 20,
+        mode: 'COMP',
+        enabled: true
+      })
+      setHpf({ frequency: 80, q: 0.7, enabled: true })
+      setLpf(prev => ({ ...prev, enabled: false }))
+    }
+  }, [])
 
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [processedUrl, setProcessedUrl] = useState<string | null>(null)
@@ -183,7 +233,8 @@ function App() {
         hpf,
         lpf,
         compressor,
-        noiseReduction
+        noiseReduction,
+        autoMix
       })
 
       if (result.success) {
@@ -202,7 +253,7 @@ function App() {
       setStatus('error')
       setErrorMsg(String(err))
     }
-  }, [filePath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction])
+  }, [filePath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix])
 
   const playOriginal = () => videoPreviewRef.current?.playOriginal()
   const playProcessed = () => videoPreviewRef.current?.playProcessed()
@@ -241,11 +292,14 @@ function App() {
         lpf={lpf}
         compressor={compressor}
         noiseReduction={noiseReduction}
+        autoMix={autoMix}
         onBandUpdate={updateBand}
         onHpfChange={setHpf}
         onLpfChange={setLpf}
         onCompressorChange={setCompressor}
         onNoiseReductionChange={setNoiseReduction}
+        onAutoMixChange={setAutoMix}
+        onAutoMixPresetChange={handleAutoMixPresetChange}
       />
       {/* Render & Playback */}
       <div className="section">

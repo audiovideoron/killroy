@@ -155,7 +155,7 @@ ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
 })
 
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
-  const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction } = options
+  const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix } = options
 
   try {
     // VALIDATION: Verify input path before any FFmpeg/ffprobe execution
@@ -250,8 +250,8 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
-    // Render processed preview with full filter chain (HPF -> EQ -> LPF -> Compressor)
-    const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction)
+    // Render processed preview with full filter chain (HPF -> NR -> EQ -> LPF -> AutoMix -> Compressor)
+    const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
 
     // Build attempts with automatic copy → re-encode fallback
     const processedAttempts: RenderAttempt[] = [

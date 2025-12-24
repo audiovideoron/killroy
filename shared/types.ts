@@ -32,6 +32,13 @@ export interface NoiseReductionParams {
   enabled: boolean
 }
 
+export type AutoMixPreset = 'LIGHT' | 'MEDIUM' | 'HEAVY'
+
+export interface AutoMixParams {
+  preset: AutoMixPreset
+  enabled: boolean
+}
+
 export interface RenderOptions {
   inputPath: string
   startTime: number
@@ -41,6 +48,7 @@ export interface RenderOptions {
   lpf: FilterParams
   compressor: CompressorParams
   noiseReduction: NoiseReductionParams
+  autoMix: AutoMixParams
 }
 
 export interface RenderResult {
