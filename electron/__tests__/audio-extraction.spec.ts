@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import { extractAudioForASR, cleanupAudioFile } from '../audio-extraction'
 import { getTranscriber } from '../asr-adapter'
 import { validateTranscriptV1 } from '../../shared/editor-types'
@@ -78,7 +78,26 @@ describe('STEP 4 Gate: Audio Extraction + ASR', () => {
   })
 
   describe('ASR Adapter', () => {
+    // Force mock mode for these tests - they should not depend on real ASR binaries
+    let originalAsrBackend: string | undefined
+
+    beforeEach(() => {
+      originalAsrBackend = process.env.ASR_BACKEND
+      process.env.ASR_BACKEND = 'mock'
+    })
+
+    afterEach(() => {
+      if (originalAsrBackend !== undefined) {
+        process.env.ASR_BACKEND = originalAsrBackend
+      } else {
+        delete process.env.ASR_BACKEND
+      }
+    })
+
     it('transcriber returns valid TranscriptV1', async () => {
+      // Verify we're in mock mode
+      expect(process.env.ASR_BACKEND).toBe('mock')
+
       const transcriber = getTranscriber()
       const videoId = 'test-video-id'
       const audioPath = '/mock/audio.wav' // Mock doesn't actually use path
