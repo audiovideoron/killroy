@@ -57,14 +57,15 @@ function App() {
     setAutoMix({ preset, enabled: true })
 
     // Configure chain based on preset
+    // All presets enable HPF at 120Hz for speech
     if (preset === 'LIGHT') {
-      // LIGHT: AutoMix only, disable all other processors
+      // LIGHT: AutoMix + HPF 120Hz only
       setNoiseReduction({ strength: 50, enabled: false })
       setCompressor(prev => ({ ...prev, enabled: false }))
-      setHpf(prev => ({ ...prev, enabled: false }))
+      setHpf({ frequency: 120, q: 0.7, enabled: true })
       setLpf(prev => ({ ...prev, enabled: false }))
     } else if (preset === 'MEDIUM') {
-      // MEDIUM: AutoMix + NR 25% + Comp (-18dB, 3:1)
+      // MEDIUM: AutoMix + HPF 120Hz + NR 25% + Comp (-18dB, 3:1)
       setNoiseReduction({ strength: 25, enabled: true })
       setCompressor({
         threshold: -18,
@@ -76,10 +77,10 @@ function App() {
         mode: 'COMP',
         enabled: true
       })
-      setHpf(prev => ({ ...prev, enabled: false }))
+      setHpf({ frequency: 120, q: 0.7, enabled: true })
       setLpf(prev => ({ ...prev, enabled: false }))
     } else if (preset === 'HEAVY') {
-      // HEAVY: AutoMix + NR 50% + Comp (-15dB, 4:1) + HPF 80Hz
+      // HEAVY: AutoMix + HPF 120Hz + NR 50% + Comp (-15dB, 4:1)
       setNoiseReduction({ strength: 50, enabled: true })
       setCompressor({
         threshold: -15,
@@ -91,7 +92,7 @@ function App() {
         mode: 'COMP',
         enabled: true
       })
-      setHpf({ frequency: 80, q: 0.7, enabled: true })
+      setHpf({ frequency: 120, q: 0.7, enabled: true })
       setLpf(prev => ({ ...prev, enabled: false }))
     }
   }, [])
