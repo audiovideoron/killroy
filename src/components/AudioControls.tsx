@@ -3,7 +3,9 @@ import type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams
+  NoiseReductionParams,
+  AutoMixParams,
+  AutoMixPreset
 } from '../../shared/types'
 
 interface AudioControlsProps {
@@ -12,11 +14,14 @@ interface AudioControlsProps {
   lpf: FilterParams
   compressor: CompressorParams
   noiseReduction: NoiseReductionParams
+  autoMix: AutoMixParams
   onBandUpdate: (index: number, field: keyof EQBand, value: number | boolean) => void
   onHpfChange: (hpf: FilterParams) => void
   onLpfChange: (lpf: FilterParams) => void
   onCompressorChange: (compressor: CompressorParams) => void
   onNoiseReductionChange: (noiseReduction: NoiseReductionParams) => void
+  onAutoMixChange: (autoMix: AutoMixParams) => void
+  onAutoMixPresetChange: (preset: AutoMixPreset) => void
 }
 
 export function AudioControls({
@@ -25,14 +30,75 @@ export function AudioControls({
   lpf,
   compressor,
   noiseReduction,
+  autoMix,
   onBandUpdate,
   onHpfChange,
   onLpfChange,
   onCompressorChange,
-  onNoiseReductionChange
+  onNoiseReductionChange,
+  onAutoMixChange,
+  onAutoMixPresetChange
 }: AudioControlsProps) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', gap: 12, padding: '6px 0' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '6px 0' }}>
+      {/* AutoMix Horizontal Bar */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 16,
+        padding: '8px 16px',
+        background: `
+          linear-gradient(180deg,
+            rgba(58,58,64,1) 0%,
+            rgba(48,48,54,1) 50%,
+            rgba(42,42,48,1) 100%
+          )
+        `,
+        border: '1px solid #555',
+        borderRadius: 3,
+        boxShadow: `
+          0 2px 6px rgba(0,0,0,0.4),
+          inset 0 1px 0 rgba(255,255,255,0.08)
+        `,
+        marginLeft: 'auto',
+        marginRight: 'auto'
+      }}>
+        <span style={{ fontSize: 10, color: '#888', fontWeight: 600, letterSpacing: 2 }}>AUTOMIX</span>
+        <Toggle checked={autoMix.enabled} onChange={v => onAutoMixChange({ ...autoMix, enabled: v })} />
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(['LIGHT', 'MEDIUM', 'HEAVY'] as AutoMixPreset[]).map(preset => (
+            <button
+              key={preset}
+              onClick={() => onAutoMixPresetChange(preset)}
+              style={{
+                padding: '5px 12px',
+                fontSize: 9,
+                fontWeight: 600,
+                letterSpacing: 0.5,
+                border: '1px solid #333',
+                borderRadius: 2,
+                cursor: 'pointer',
+                background: autoMix.preset === preset
+                  ? 'linear-gradient(180deg, #3a3a3a 0%, #2a2a2a 100%)'
+                  : 'linear-gradient(180deg, #4a4a4a 0%, #3a3a3a 100%)',
+                color: autoMix.preset === preset
+                  ? (autoMix.enabled ? '#4fc3f7' : '#888')
+                  : '#666',
+                boxShadow: autoMix.preset === preset
+                  ? 'inset 0 2px 4px rgba(0,0,0,0.5), 0 0 4px rgba(79,195,247,0.2)'
+                  : '0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08)',
+                opacity: autoMix.enabled ? 1 : 0.5
+              }}
+            >
+              {preset}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Channel Strips Row */}
+      <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
       {/* Compressor Strip */}
       <div style={{
         width: 150,
@@ -355,6 +421,7 @@ export function AudioControls({
             <Toggle checked={lpf.enabled} onChange={v => onLpfChange({ ...lpf, enabled: v })} />
           </div>
         </div>
+      </div>
       </div>
     </div>
   )
