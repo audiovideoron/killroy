@@ -31,7 +31,16 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
 
     return (
       <div className="section">
-        <video ref={videoRef} controls style={{ width: '100%', maxHeight: 400 }} />
+        <video
+          ref={videoRef}
+          controls
+          style={{
+            width: '100%',
+            maxHeight: 400,
+            willChange: 'transform',
+            transform: 'translateZ(0)'
+          }}
+        />
       </div>
     )
   }
