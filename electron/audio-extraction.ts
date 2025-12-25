@@ -22,7 +22,11 @@ export async function extractAudioForASR(
     fs.mkdirSync(outputDir, { recursive: true })
   }
 
-  return new Promise((resolve, reject) => {
+  const TIMEOUT_MS = 60000 // 60 seconds
+
+  let proc: ReturnType<typeof spawn> | null = null
+
+  const extractionPromise = new Promise<string>((resolve, reject) => {
     const args = [
       '-y', // Overwrite
       '-i', videoPath,
@@ -33,7 +37,7 @@ export async function extractAudioForASR(
       outputPath
     ]
 
-    const proc = spawn('ffmpeg', args)
+    proc = spawn('ffmpeg', args)
     let stderr = ''
 
     proc.stderr.on('data', (data) => {
@@ -51,6 +55,17 @@ export async function extractAudioForASR(
       reject(new Error(`Failed to spawn ffmpeg: ${err.message}`))
     })
   })
+
+  const timeoutPromise = new Promise<string>((_, reject) => {
+    setTimeout(() => {
+      if (proc && !proc.killed) {
+        proc.kill('SIGKILL')
+      }
+      reject(new Error(`Audio extraction timed out after ${TIMEOUT_MS}ms`))
+    }, TIMEOUT_MS)
+  })
+
+  return Promise.race([extractionPromise, timeoutPromise])
 }
 
 /**
