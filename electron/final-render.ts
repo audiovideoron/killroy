@@ -8,6 +8,7 @@ import * as fs from 'fs'
 import type { EdlV1, VideoAsset } from '../shared/editor-types'
 import { buildEffectiveRemoveRanges, invertToKeepRanges, computeEditedDuration } from './edl-engine'
 import { runFFmpeg } from './ffmpeg-runner'
+import { validateMediaPath } from './path-validation'
 
 export interface FinalRenderOptions {
   videoAsset: VideoAsset
@@ -32,6 +33,17 @@ export interface RenderReport {
 export async function renderFinal(options: FinalRenderOptions): Promise<RenderReport> {
   const { videoAsset, edl, outputPath } = options
   const startTime = Date.now()
+
+  // Validate input video path
+  const inputValidation = validateMediaPath(videoAsset.file_path)
+  if (!inputValidation.ok) {
+    throw new Error(`Invalid input video path: ${inputValidation.message}`)
+  }
+
+  // Validate output path is absolute
+  if (!path.isAbsolute(outputPath)) {
+    throw new Error(`Output path must be absolute: ${outputPath}`)
+  }
 
   // Ensure output directory exists
   const outputDir = path.dirname(outputPath)
