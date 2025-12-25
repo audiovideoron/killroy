@@ -82,14 +82,9 @@ export async function renderFinal(options: FinalRenderOptions): Promise<RenderRe
     // Concat segments
     await concatSegments(segmentPaths, outputPath)
   } finally {
-    // Cleanup segments
-    for (const segmentPath of segmentPaths) {
-      if (fs.existsSync(segmentPath)) {
-        fs.unlinkSync(segmentPath)
-      }
-    }
+    // Cleanup temp directory (including all segment files)
     if (fs.existsSync(tmpDir)) {
-      fs.rmdirSync(tmpDir)
+      fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   }
 
