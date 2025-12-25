@@ -70,17 +70,22 @@ export async function renderFinal(options: FinalRenderOptions): Promise<RenderRe
   const segmentPaths: string[] = []
 
   try {
+    console.log(`[final-render] Extracting ${keepRanges.length} segment(s)...`)
+
     // Extract each segment
     for (let i = 0; i < keepRanges.length; i++) {
       const range = keepRanges[i]
       const segmentPath = path.join(tmpDir, `segment-${i}.mp4`)
 
+      console.log(`[final-render] Extracting segment ${i + 1} of ${keepRanges.length}...`)
       await extractSegment(videoAsset.file_path, range, segmentPath)
       segmentPaths.push(segmentPath)
     }
 
+    console.log('[final-render] Concatenating segments...')
     // Concat segments
     await concatSegments(segmentPaths, outputPath)
+    console.log('[final-render] Render complete')
   } finally {
     // Cleanup segments
     for (const segmentPath of segmentPaths) {
