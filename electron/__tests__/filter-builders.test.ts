@@ -3,7 +3,8 @@ import type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams
+  NoiseReductionParams,
+  AutoMixParams
 } from '../../shared/types'
 
 // These functions are tested by replicating the logic from electron/main.ts
@@ -76,30 +77,64 @@ function buildNoiseReductionFilter(nr: NoiseReductionParams): string {
   return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
 }
 
-function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams): string {
-  const filters: string[] = []
+function buildAutoMixFilter(autoMix: AutoMixParams): string {
+  if (!autoMix.enabled) return ''
 
-  if (hpf.enabled) {
-    filters.push(`highpass=f=${hpf.frequency}`)
+  const presets = {
+    LIGHT:  { framelen: 800, gausssize: 51, maxgain: 3 },
+    MEDIUM: { framelen: 500, gausssize: 35, maxgain: 6 },
+    HEAVY:  { framelen: 200, gausssize: 21, maxgain: 10 }
   }
 
+  const params = presets[autoMix.preset]
+  const peak = 0.9
+
+  return `dynaudnorm=f=${params.framelen}:g=${params.gausssize}:p=${peak}:m=${params.maxgain}`
+}
+
+/**
+ * Build full audio filter chain.
+ *
+ * Signal chain order (when enabled):
+ *   NR → HPF → LPF → EQ → Compressor → AutoMix
+ */
+function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix?: AutoMixParams): string {
+  const filters: string[] = []
+
+  // 1. Noise reduction (first - remove noise before any processing)
   const nrFilter = buildNoiseReductionFilter(noiseReduction)
   if (nrFilter) {
     filters.push(nrFilter)
   }
 
+  // 2. High-pass filter (bandwidth limiting)
+  if (hpf.enabled) {
+    filters.push(`highpass=f=${hpf.frequency}`)
+  }
+
+  // 3. Low-pass filter (bandwidth limiting)
+  if (lpf.enabled) {
+    filters.push(`lowpass=f=${lpf.frequency}`)
+  }
+
+  // 4. Parametric EQ bands (tonal shaping)
   const eqFilter = buildEQFilter(bands)
   if (eqFilter) {
     filters.push(eqFilter)
   }
 
-  if (lpf.enabled) {
-    filters.push(`lowpass=f=${lpf.frequency}`)
-  }
-
+  // 5. Compressor/Limiter (dynamics control)
   const compFilter = buildCompressorFilter(compressor)
   if (compFilter) {
     filters.push(compFilter)
+  }
+
+  // 6. AutoMix (final-stage leveling - always last)
+  if (autoMix) {
+    const autoMixFilter = buildAutoMixFilter(autoMix)
+    if (autoMixFilter) {
+      filters.push(autoMixFilter)
+    }
   }
 
   return filters.join(',')
@@ -771,7 +806,7 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe(`highpass=f=100,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`)
   })
 
-  it('builds complete chain in correct order: HPF -> NR -> EQ -> LPF -> COMP', () => {
+  it('builds complete chain in correct order: NR -> HPF -> LPF -> EQ -> COMP', () => {
     const params = createDefaultParams()
     params.hpf.enabled = true
     params.hpf.frequency = 100
@@ -800,8 +835,9 @@ describe('buildFullFilterChain', () => {
     const attackSec = 10 / 1000
     const releaseSec = 100 / 1000
 
+    // Order: NR -> HPF -> LPF -> EQ -> Compressor
     expect(result).toBe(
-      `highpass=f=100,afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,equalizer=f=1000:t=h:w=${eqWidth}:g=3,lowpass=f=10000,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
+      `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
     )
   })
 
@@ -921,7 +957,7 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
   })
 
-  it('places compressor at end of chain after all other filters', () => {
+  it('places compressor after EQ and before AutoMix', () => {
     const params = createDefaultParams()
     params.hpf.enabled = true
     params.hpf.frequency = 60
@@ -948,8 +984,9 @@ describe('buildFullFilterChain', () => {
     const attackSec = 10 / 1000
     const releaseSec = 100 / 1000
 
+    // Order: HPF -> LPF -> EQ -> Compressor (NR disabled)
     expect(result).toBe(
-      `highpass=f=60,equalizer=f=800:t=h:w=${eqWidth}:g=2,lowpass=f=18000,highpass=f=50,acompressor=threshold=-15dB:ratio=3:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
+      `highpass=f=60,lowpass=f=18000,equalizer=f=800:t=h:w=${eqWidth}:g=2,highpass=f=50,acompressor=threshold=-15dB:ratio=3:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
     )
   })
 
@@ -991,17 +1028,181 @@ describe('buildFullFilterChain', () => {
     const attackSec = 15 / 1000
     const releaseSec = 150 / 1000
 
+    // Order: NR -> HPF -> LPF -> EQ -> Compressor
     const expected = [
-      'highpass=f=75',
       `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`,
+      'highpass=f=75',
+      'lowpass=f=16000',
       `equalizer=f=200:t=h:w=${width1}:g=2`,
       `equalizer=f=2000:t=h:w=${width2}:g=-1`,
       `equalizer=f=8000:t=h:w=${width3}:g=3`,
-      'lowpass=f=16000',
       'highpass=f=120',
       `acompressor=threshold=-18dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=2dB`
     ].join(',')
 
     expect(result).toBe(expected)
+  })
+
+  describe('AutoMix placement', () => {
+    it('places AutoMix LIGHT preset after compressor as final stage', () => {
+      const params = createDefaultParams()
+      params.compressor.enabled = true
+      params.compressor.mode = 'LEVEL'
+      params.compressor.makeup = 3
+      const autoMix: AutoMixParams = { enabled: true, preset: 'LIGHT' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      // Order: Compressor -> AutoMix
+      expect(result).toBe('volume=3dB,dynaudnorm=f=800:g=51:p=0.9:m=3')
+    })
+
+    it('places AutoMix MEDIUM preset after compressor as final stage', () => {
+      const params = createDefaultParams()
+      params.hpf.enabled = true
+      params.hpf.frequency = 80
+      params.compressor.enabled = true
+      params.compressor.mode = 'LEVEL'
+      params.compressor.makeup = 2
+      const autoMix: AutoMixParams = { enabled: true, preset: 'MEDIUM' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      // Order: HPF -> Compressor -> AutoMix
+      expect(result).toBe('highpass=f=80,volume=2dB,dynaudnorm=f=500:g=35:p=0.9:m=6')
+    })
+
+    it('places AutoMix HEAVY preset after compressor as final stage', () => {
+      const params = createDefaultParams()
+      params.noiseReduction.enabled = true
+      params.noiseReduction.strength = 50
+      params.lpf.enabled = true
+      params.lpf.frequency = 12000
+      const autoMix: AutoMixParams = { enabled: true, preset: 'HEAVY' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      const nrValue = Math.round((50 / 100) * 40)
+      const nfValue = Math.round(-50 + (50 / 100) * 15)
+
+      // Order: NR -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
+      expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10`)
+    })
+
+    it('builds complete chain with AutoMix: NR -> HPF -> LPF -> EQ -> COMP -> AutoMix', () => {
+      const params = createDefaultParams()
+      params.noiseReduction.enabled = true
+      params.noiseReduction.strength = 30
+      params.hpf.enabled = true
+      params.hpf.frequency = 120
+      params.lpf.enabled = true
+      params.lpf.frequency = 10000
+      params.bands = [
+        { frequency: 1000, gain: 4, q: 1.5, enabled: true }
+      ]
+      params.compressor.enabled = true
+      params.compressor.mode = 'LEVEL'
+      params.compressor.makeup = 5
+      const autoMix: AutoMixParams = { enabled: true, preset: 'MEDIUM' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      const nrValue = Math.round((30 / 100) * 40)
+      const nfValue = Math.round(-50 + (30 / 100) * 15)
+      const eqWidth = 1000 / 1.5
+
+      // Full chain: NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix
+      expect(result).toBe(
+        `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
+      )
+    })
+
+    it('skips disabled AutoMix', () => {
+      const params = createDefaultParams()
+      params.hpf.enabled = true
+      params.hpf.frequency = 100
+      const autoMix: AutoMixParams = { enabled: false, preset: 'LIGHT' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      expect(result).toBe('highpass=f=100')
+    })
+
+    it('handles AutoMix with no other filters enabled', () => {
+      const params = createDefaultParams()
+      const autoMix: AutoMixParams = { enabled: true, preset: 'LIGHT' }
+
+      const result = buildFullFilterChain(
+        params.hpf,
+        params.bands,
+        params.lpf,
+        params.compressor,
+        params.noiseReduction,
+        autoMix
+      )
+
+      expect(result).toBe('dynaudnorm=f=800:g=51:p=0.9:m=3')
+    })
+  })
+})
+
+describe('buildAutoMixFilter', () => {
+  it('returns empty string when disabled', () => {
+    const autoMix: AutoMixParams = { enabled: false, preset: 'LIGHT' }
+    const result = buildAutoMixFilter(autoMix)
+    expect(result).toBe('')
+  })
+
+  it('builds LIGHT preset correctly', () => {
+    const autoMix: AutoMixParams = { enabled: true, preset: 'LIGHT' }
+    const result = buildAutoMixFilter(autoMix)
+    expect(result).toBe('dynaudnorm=f=800:g=51:p=0.9:m=3')
+  })
+
+  it('builds MEDIUM preset correctly', () => {
+    const autoMix: AutoMixParams = { enabled: true, preset: 'MEDIUM' }
+    const result = buildAutoMixFilter(autoMix)
+    expect(result).toBe('dynaudnorm=f=500:g=35:p=0.9:m=6')
+  })
+
+  it('builds HEAVY preset correctly', () => {
+    const autoMix: AutoMixParams = { enabled: true, preset: 'HEAVY' }
+    const result = buildAutoMixFilter(autoMix)
+    expect(result).toBe('dynaudnorm=f=200:g=21:p=0.9:m=10')
   })
 })

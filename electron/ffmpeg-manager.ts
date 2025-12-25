@@ -536,45 +536,55 @@ export function buildAutoMixFilter(autoMix: AutoMixParams): string {
 }
 
 /**
- * Build full audio filter chain
+ * Build full audio filter chain.
+ *
+ * Signal chain order (when enabled):
+ *   NR → HPF → LPF → EQ → Compressor → AutoMix
+ *
+ * Rationale:
+ * - NR first: removes noise before any frequency shaping
+ * - HPF/LPF next: bandwidth limiting before tonal adjustment
+ * - EQ: tonal shaping on clean, bandwidth-limited signal
+ * - Compressor: dynamics control on shaped signal
+ * - AutoMix last: final-stage leveling as output processor
  */
 export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix?: AutoMixParams): string {
   const filters: string[] = []
 
-  // 1. High-pass filter (if enabled)
-  if (hpf.enabled) {
-    filters.push(`highpass=f=${hpf.frequency}`)
-  }
-
-  // 2. Noise reduction (early in chain, before EQ)
+  // 1. Noise reduction (first - remove noise before any processing)
   const nrFilter = buildNoiseReductionFilter(noiseReduction)
   if (nrFilter) {
     filters.push(nrFilter)
   }
 
-  // 3. Parametric EQ bands
+  // 2. High-pass filter (bandwidth limiting)
+  if (hpf.enabled) {
+    filters.push(`highpass=f=${hpf.frequency}`)
+  }
+
+  // 3. Low-pass filter (bandwidth limiting)
+  if (lpf.enabled) {
+    filters.push(`lowpass=f=${lpf.frequency}`)
+  }
+
+  // 4. Parametric EQ bands (tonal shaping)
   const eqFilter = buildEQFilter(bands)
   if (eqFilter) {
     filters.push(eqFilter)
   }
 
-  // 4. Low-pass filter (if enabled)
-  if (lpf.enabled) {
-    filters.push(`lowpass=f=${lpf.frequency}`)
+  // 5. Compressor/Limiter (dynamics control)
+  const compFilter = buildCompressorFilter(compressor)
+  if (compFilter) {
+    filters.push(compFilter)
   }
 
-  // 5. AutoMix (after cleaned speech, before compressor/limiter)
+  // 6. AutoMix (final-stage leveling - always last)
   if (autoMix) {
     const autoMixFilter = buildAutoMixFilter(autoMix)
     if (autoMixFilter) {
       filters.push(autoMixFilter)
     }
-  }
-
-  // 6. Compressor/Limiter (after EQ, before final output)
-  const compFilter = buildCompressorFilter(compressor)
-  if (compFilter) {
-    filters.push(compFilter)
   }
 
   return filters.join(',')
