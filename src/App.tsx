@@ -18,6 +18,10 @@ function App() {
   const [status, setStatus] = useState<Status>('idle')
   const [errorMsg, setErrorMsg] = useState('')
 
+  // Dirty flag: true = processed audio is stale, needs re-render before playback
+  // Initial: true (no processed audio yet)
+  const [processedDirty, setProcessedDirty] = useState(true)
+
   // Job progress tracking
   const { currentJob } = useJobProgress()
 
@@ -51,8 +55,22 @@ function App() {
     enabled: false
   })
 
+  // Dirty-marking wrappers for all audio parameters
+  // Any change to render configuration marks processed audio as stale
+  const markDirtyAndSetStartTime = useCallback((v: number) => { setProcessedDirty(true); setStartTime(v) }, [])
+  const markDirtyAndSetDuration = useCallback((v: number) => { setProcessedDirty(true); setDuration(v) }, [])
+  const markDirtyAndSetBands = useCallback((updater: (prev: EQBand[]) => EQBand[]) => { setProcessedDirty(true); setBands(updater) }, [])
+  const markDirtyAndSetHpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setHpf(v) }, [])
+  const markDirtyAndSetLpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setLpf(v) }, [])
+  const markDirtyAndSetCompressor = useCallback((v: CompressorParams | ((prev: CompressorParams) => CompressorParams)) => { setProcessedDirty(true); setCompressor(v) }, [])
+  const markDirtyAndSetNoiseReduction = useCallback((v: NoiseReductionParams) => { setProcessedDirty(true); setNoiseReduction(v) }, [])
+  const markDirtyAndSetAutoMix = useCallback((v: AutoMixParams) => { setProcessedDirty(true); setAutoMix(v) }, [])
+
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
+    // Mark dirty - configuration is changing
+    setProcessedDirty(true)
+
     // Always enable AutoMix and set the preset
     setAutoMix({ preset, enabled: true })
 
@@ -126,6 +144,7 @@ function App() {
       setErrorMsg('')
       setOriginalUrl(null)
       setProcessedUrl(null)
+      setProcessedDirty(true)  // New file = no processed audio
       // Clear transcript error when new file is selected
       setTranscriptError(null)
     }
@@ -210,7 +229,7 @@ function App() {
   }, [filePath, transcriptCache, isTranscriptLoading, loadTranscript])
 
   const updateBand = (index: number, field: keyof EQBand, value: number | boolean) => {
-    setBands(prev => {
+    markDirtyAndSetBands(prev => {
       const updated = [...prev]
       updated[index] = { ...updated[index], [field]: value }
       return updated
@@ -245,19 +264,30 @@ function App() {
         const cacheBuster = `?v=${result.renderId}`
         setOriginalUrl(origUrl + cacheBuster)
         setProcessedUrl(procUrl + cacheBuster)
+        setProcessedDirty(false)  // Render complete - processed audio is current
         setStatus('done')
       } else {
+        // Keep processedDirty = true on failure
         setStatus('error')
         setErrorMsg(result.error || 'Unknown error')
       }
     } catch (err) {
+      // Keep processedDirty = true on failure
       setStatus('error')
       setErrorMsg(String(err))
     }
   }, [filePath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix])
 
   const playOriginal = () => videoPreviewRef.current?.playOriginal()
-  const playProcessed = () => videoPreviewRef.current?.playProcessed()
+  const playProcessed = () => {
+    // Playback gate: only play if processed audio is current
+    if (processedDirty) {
+      // Force render if dirty - don't play stale audio
+      handleRender()
+      return
+    }
+    videoPreviewRef.current?.playProcessed()
+  }
 
   // Build status text for App-level status (non-job-progress states)
   const statusText = !currentJob ? {
@@ -283,8 +313,8 @@ function App() {
             startTime={startTime}
             duration={duration}
             onSelectFile={handleSelectFile}
-            onStartTimeChange={setStartTime}
-            onDurationChange={setDuration}
+            onStartTimeChange={markDirtyAndSetStartTime}
+            onDurationChange={markDirtyAndSetDuration}
           />
       {/* Channel Strips Container */}
       <AudioControls
@@ -295,11 +325,11 @@ function App() {
         noiseReduction={noiseReduction}
         autoMix={autoMix}
         onBandUpdate={updateBand}
-        onHpfChange={setHpf}
-        onLpfChange={setLpf}
-        onCompressorChange={setCompressor}
-        onNoiseReductionChange={setNoiseReduction}
-        onAutoMixChange={setAutoMix}
+        onHpfChange={markDirtyAndSetHpf}
+        onLpfChange={markDirtyAndSetLpf}
+        onCompressorChange={markDirtyAndSetCompressor}
+        onNoiseReductionChange={markDirtyAndSetNoiseReduction}
+        onAutoMixChange={markDirtyAndSetAutoMix}
         onAutoMixPresetChange={handleAutoMixPresetChange}
       />
       {/* Render & Playback */}
@@ -311,8 +341,12 @@ function App() {
           <button onClick={playOriginal} disabled={!originalUrl}>
             Play Original
           </button>
-          <button onClick={playProcessed} disabled={!processedUrl}>
-            Play Processed
+          <button
+            onClick={playProcessed}
+            disabled={!filePath || status === 'rendering'}
+            style={processedDirty && filePath ? { opacity: 0.7 } : undefined}
+          >
+            {processedDirty && filePath ? 'Render & Play' : 'Play Processed'}
           </button>
           {!currentJob && statusText && (
             <div className={`status ${status}`} style={{ marginLeft: 12 }}>
