@@ -24,6 +24,9 @@ import {
   cancelFFmpegJob,
   getActiveFFmpegJobs,
   FFmpegErrorType,
+  analyzeLoudness,
+  calculateLoudnessGain,
+  buildLoudnessGainFilter,
   type RenderAttempt
 } from './ffmpeg-manager'
 import {
@@ -250,8 +253,28 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
-    // Render processed preview with full filter chain (NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix)
-    const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
+    // Build base filter chain (NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix)
+    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
+
+    // === PASS 1: Loudness Analysis ===
+    // Analyze loudness of the processed audio to determine gain adjustment
+    let loudnessGain: number | null = null
+    try {
+      const analysis = await analyzeLoudness(inputPath, baseFilterChain, startTime, duration)
+      if (analysis) {
+        loudnessGain = calculateLoudnessGain(analysis)
+        console.log('[render-preview] Loudness analysis:', analysis)
+        console.log('[render-preview] Calculated gain:', loudnessGain, 'dB')
+      }
+    } catch (err) {
+      console.warn('[render-preview] Loudness analysis failed, skipping normalization:', err)
+    }
+
+    // === Build final filter chain (base + loudness gain) ===
+    const loudnessFilter = buildLoudnessGainFilter(loudnessGain)
+    const filterChain = loudnessFilter
+      ? (baseFilterChain ? `${baseFilterChain},${loudnessFilter}` : loudnessFilter)
+      : baseFilterChain
 
     // Build attempts with automatic copy → re-encode fallback
     const processedAttempts: RenderAttempt[] = [

@@ -9,8 +9,10 @@ import type {
   NoiseReductionParams,
   AutoMixParams,
   JobProgressEvent,
-  JobStatus
+  JobStatus,
+  LoudnessAnalysis
 } from '../shared/types'
+import { LOUDNESS_CONFIG } from '../shared/types'
 
 /**
  * FFmpeg job tracking for lifecycle management.
@@ -565,6 +567,205 @@ export function buildAutoMixFilter(autoMix: AutoMixParams): string {
   const peak = 0.9
 
   return `dynaudnorm=f=${params.framelen}:g=${params.gausssize}:p=${peak}:m=${params.maxgain}`
+}
+
+/**
+ * Parse loudnorm JSON output from FFmpeg stderr.
+ * Looks for JSON block with input_i field.
+ *
+ * FFmpeg loudnorm outputs JSON like:
+ * {
+ *   "input_i" : "-23.54",
+ *   "input_tp" : "-1.02",
+ *   "input_lra" : "8.70",
+ *   "input_thresh" : "-34.21",
+ *   ...
+ * }
+ */
+export function parseLoudnormOutput(stderr: string): LoudnessAnalysis | null {
+  // Find JSON block (starts with { containing "input_i")
+  // Using [\s\S]* instead of .* with 's' flag for cross-line matching
+  const jsonMatch = stderr.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/)
+  if (!jsonMatch) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0])
+
+    // Validate required fields exist and are parseable
+    const input_i = parseFloat(parsed.input_i)
+    const input_tp = parseFloat(parsed.input_tp)
+    const input_lra = parseFloat(parsed.input_lra)
+    const input_thresh = parseFloat(parsed.input_thresh)
+
+    if (isNaN(input_i) || isNaN(input_tp)) {
+      console.warn('[loudness] Invalid loudnorm values: input_i or input_tp is NaN')
+      return null
+    }
+
+    return {
+      input_i,
+      input_tp,
+      input_lra: isNaN(input_lra) ? 0 : input_lra,
+      input_thresh: isNaN(input_thresh) ? -70 : input_thresh
+    }
+  } catch (err) {
+    console.error('[loudness] JSON parse error:', err)
+    return null
+  }
+}
+
+/**
+ * Calculate safe gain adjustment from loudness analysis.
+ * Applies safety guardrails: clamping, peak limiting, silence detection.
+ *
+ * @param analysis Loudness analysis from Pass 1
+ * @returns Gain in dB to apply, or null to skip normalization
+ */
+export function calculateLoudnessGain(analysis: LoudnessAnalysis): number | null {
+  const {
+    TARGET_LUFS,
+    TRUE_PEAK_CEILING,
+    MAX_GAIN_UP,
+    MAX_GAIN_DOWN,
+    SILENCE_THRESHOLD,
+    NEGLIGIBLE_GAIN
+  } = LOUDNESS_CONFIG
+
+  // Guard 1: Skip near-silent input
+  if (analysis.input_i < SILENCE_THRESHOLD) {
+    console.log('[loudness] Skipping silent input:', analysis.input_i, 'LUFS')
+    return null
+  }
+
+  // Calculate desired gain
+  let gain = TARGET_LUFS - analysis.input_i
+
+  // Guard 2: Clamp to max gain up/down
+  gain = Math.max(MAX_GAIN_DOWN, Math.min(MAX_GAIN_UP, gain))
+
+  // Guard 3: Prevent clipping (true peak + gain must not exceed ceiling)
+  const projectedPeak = analysis.input_tp + gain
+  if (projectedPeak > TRUE_PEAK_CEILING) {
+    const reducedGain = TRUE_PEAK_CEILING - analysis.input_tp
+    console.log('[loudness] Reduced gain to prevent clipping:', gain.toFixed(2), '->', reducedGain.toFixed(2), 'dB')
+    gain = reducedGain
+  }
+
+  // Guard 4: Skip if gain is negligible
+  if (Math.abs(gain) < NEGLIGIBLE_GAIN) {
+    console.log('[loudness] Skipping negligible gain:', gain.toFixed(2), 'dB')
+    return null
+  }
+
+  return gain
+}
+
+/**
+ * Build volume filter for loudness normalization.
+ * Returns empty string if gain is null (passthrough).
+ */
+export function buildLoudnessGainFilter(gainDb: number | null): string {
+  if (gainDb === null) return ''
+  return `volume=${gainDb.toFixed(2)}dB`
+}
+
+/**
+ * Analyze audio loudness using FFmpeg loudnorm filter.
+ * Runs FFmpeg in "analysis only" mode - no output file.
+ *
+ * @param inputPath Path to input file
+ * @param filterChain Existing filter chain to apply before analysis
+ * @param startTime Start time in seconds
+ * @param duration Duration in seconds
+ * @param timeoutMs Timeout in milliseconds (default: 30s)
+ * @returns LoudnessAnalysis or null if analysis failed
+ */
+export async function analyzeLoudness(
+  inputPath: string,
+  filterChain: string,
+  startTime: number,
+  duration: number,
+  timeoutMs: number = 30000
+): Promise<LoudnessAnalysis | null> {
+  // Build analysis filter chain: existing filters + loudnorm in analysis mode
+  const analysisFilter = filterChain
+    ? `${filterChain},loudnorm=I=${LOUDNESS_CONFIG.TARGET_LUFS}:TP=${LOUDNESS_CONFIG.TRUE_PEAK_CEILING}:print_format=json`
+    : `loudnorm=I=${LOUDNESS_CONFIG.TARGET_LUFS}:TP=${LOUDNESS_CONFIG.TRUE_PEAK_CEILING}:print_format=json`
+
+  const args = [
+    '-y',
+    '-ss', startTime.toString(),
+    '-t', duration.toString(),
+    '-i', inputPath,
+    '-af', analysisFilter,
+    '-f', 'null',
+    '-'
+  ]
+
+  console.log('[loudness] Analyzing:', 'ffmpeg', args.join(' '))
+
+  return new Promise((resolve) => {
+    const proc = spawn('ffmpeg', args)
+    let stderr = ''
+    let resolved = false
+
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true
+        if (proc && !proc.killed) {
+          try {
+            proc.kill('SIGTERM')
+          } catch (err) {
+            // Ignore kill errors
+          }
+        }
+      }
+    }
+
+    // Timeout protection
+    const timeoutHandle = setTimeout(() => {
+      console.warn('[loudness] Analysis timed out after', timeoutMs, 'ms')
+      cleanup()
+      resolve(null)
+    }, timeoutMs)
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', (code) => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeoutHandle)
+
+      if (code !== 0) {
+        console.warn('[loudness] Analysis exited with code:', code)
+        resolve(null)
+        return
+      }
+
+      // Parse loudnorm JSON from stderr
+      const analysis = parseLoudnormOutput(stderr)
+      if (!analysis) {
+        console.warn('[loudness] Failed to parse loudnorm output')
+        resolve(null)
+        return
+      }
+
+      console.log('[loudness] Analysis result:', analysis)
+      resolve(analysis)
+    })
+
+    proc.on('error', (err) => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeoutHandle)
+      console.error('[loudness] Analysis spawn error:', err)
+      resolve(null)
+    })
+  })
 }
 
 /**

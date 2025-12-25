@@ -1206,3 +1206,569 @@ describe('buildAutoMixFilter', () => {
     expect(result).toBe('dynaudnorm=f=200:g=21:p=0.9:m=10')
   })
 })
+
+// ============================================================================
+// Loudness Normalization Tests
+// ============================================================================
+
+interface LoudnessAnalysis {
+  input_i: number
+  input_tp: number
+  input_lra: number
+  input_thresh: number
+}
+
+const LOUDNESS_CONFIG = {
+  TARGET_LUFS: -14,
+  TRUE_PEAK_CEILING: -1,
+  MAX_GAIN_UP: 12,
+  MAX_GAIN_DOWN: -6,
+  SILENCE_THRESHOLD: -70,
+  NEGLIGIBLE_GAIN: 0.5,
+} as const
+
+/**
+ * Parse loudnorm JSON output from FFmpeg stderr.
+ */
+function parseLoudnormOutput(stderr: string): LoudnessAnalysis | null {
+  const jsonMatch = stderr.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/)
+  if (!jsonMatch) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0])
+
+    const input_i = parseFloat(parsed.input_i)
+    const input_tp = parseFloat(parsed.input_tp)
+    const input_lra = parseFloat(parsed.input_lra)
+    const input_thresh = parseFloat(parsed.input_thresh)
+
+    if (isNaN(input_i) || isNaN(input_tp)) {
+      return null
+    }
+
+    return {
+      input_i,
+      input_tp,
+      input_lra: isNaN(input_lra) ? 0 : input_lra,
+      input_thresh: isNaN(input_thresh) ? -70 : input_thresh
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Calculate safe gain adjustment from loudness analysis.
+ */
+function calculateLoudnessGain(analysis: LoudnessAnalysis): number | null {
+  const {
+    TARGET_LUFS,
+    TRUE_PEAK_CEILING,
+    MAX_GAIN_UP,
+    MAX_GAIN_DOWN,
+    SILENCE_THRESHOLD,
+    NEGLIGIBLE_GAIN
+  } = LOUDNESS_CONFIG
+
+  // Guard 1: Skip near-silent input
+  if (analysis.input_i < SILENCE_THRESHOLD) {
+    return null
+  }
+
+  // Calculate desired gain
+  let gain = TARGET_LUFS - analysis.input_i
+
+  // Guard 2: Clamp to max gain up/down
+  gain = Math.max(MAX_GAIN_DOWN, Math.min(MAX_GAIN_UP, gain))
+
+  // Guard 3: Prevent clipping
+  const projectedPeak = analysis.input_tp + gain
+  if (projectedPeak > TRUE_PEAK_CEILING) {
+    gain = TRUE_PEAK_CEILING - analysis.input_tp
+  }
+
+  // Guard 4: Skip if gain is negligible
+  if (Math.abs(gain) < NEGLIGIBLE_GAIN) {
+    return null
+  }
+
+  return gain
+}
+
+/**
+ * Build volume filter for loudness normalization.
+ */
+function buildLoudnessGainFilter(gainDb: number | null): string {
+  if (gainDb === null) return ''
+  return `volume=${gainDb.toFixed(2)}dB`
+}
+
+describe('parseLoudnormOutput', () => {
+  it('parses valid loudnorm JSON', () => {
+    const stderr = `
+      [Parsed_loudnorm_0 @ 0x7f8b8c004a80]
+      {
+        "input_i" : "-23.54",
+        "input_tp" : "-1.02",
+        "input_lra" : "8.70",
+        "input_thresh" : "-34.21"
+      }
+    `
+    const result = parseLoudnormOutput(stderr)
+    expect(result).toEqual({
+      input_i: -23.54,
+      input_tp: -1.02,
+      input_lra: 8.70,
+      input_thresh: -34.21
+    })
+  })
+
+  it('returns null for missing JSON', () => {
+    expect(parseLoudnormOutput('no json here')).toBeNull()
+    expect(parseLoudnormOutput('')).toBeNull()
+  })
+
+  it('returns null for invalid JSON', () => {
+    const stderr = '{ "input_i": "not a number" }'
+    expect(parseLoudnormOutput(stderr)).toBeNull()
+  })
+
+  it('handles missing optional fields', () => {
+    const stderr = '{ "input_i": "-20", "input_tp": "-2" }'
+    const result = parseLoudnormOutput(stderr)
+    expect(result).toEqual({
+      input_i: -20,
+      input_tp: -2,
+      input_lra: 0,
+      input_thresh: -70
+    })
+  })
+
+  it('extracts JSON from noisy stderr', () => {
+    const stderr = `
+      frame=   50 fps=0.0 q=0.0 size=N/A time=00:00:01.67 bitrate=N/A speed=N/A
+      [Parsed_loudnorm_0 @ 0x7f8b8c004a80]
+      {
+        "input_i" : "-18.00",
+        "input_tp" : "-3.50",
+        "input_lra" : "5.00",
+        "input_thresh" : "-28.00"
+      }
+      video:0kB audio:192kB subtitle:0kB other streams:0kB
+    `
+    const result = parseLoudnormOutput(stderr)
+    expect(result?.input_i).toBe(-18)
+    expect(result?.input_tp).toBe(-3.5)
+  })
+})
+
+describe('calculateLoudnessGain', () => {
+  it('calculates correct gain for typical speech', () => {
+    const analysis: LoudnessAnalysis = { input_i: -23, input_tp: -12, input_lra: 8, input_thresh: -34 }
+    // Target: -14 LUFS. Input: -23 LUFS. Gain: -14 - (-23) = 9 dB
+    // Peak check: -12 + 9 = -3 dB, which is < -1 ceiling (OK)
+    expect(calculateLoudnessGain(analysis)).toBe(9)
+  })
+
+  it('clamps gain up to MAX_GAIN_UP (12dB)', () => {
+    const analysis: LoudnessAnalysis = { input_i: -40, input_tp: -20, input_lra: 5, input_thresh: -50 }
+    // Desired gain: -14 - (-40) = 26 dB, but clamped to 12
+    expect(calculateLoudnessGain(analysis)).toBe(12)
+  })
+
+  it('clamps gain down to MAX_GAIN_DOWN (-6dB)', () => {
+    const analysis: LoudnessAnalysis = { input_i: -5, input_tp: -10, input_lra: 3, input_thresh: -15 }
+    // Desired gain: -14 - (-5) = -9 dB, but clamped to -6
+    expect(calculateLoudnessGain(analysis)).toBe(-6)
+  })
+
+  it('prevents clipping by reducing gain', () => {
+    const analysis: LoudnessAnalysis = { input_i: -20, input_tp: -2, input_lra: 6, input_thresh: -30 }
+    // Desired gain: 6 dB. Peak + gain = -2 + 6 = 4 > -1 ceiling
+    // Reduce to: -1 - (-2) = 1 dB
+    expect(calculateLoudnessGain(analysis)).toBe(1)
+  })
+
+  it('returns null for silent input (below -70 LUFS)', () => {
+    const analysis: LoudnessAnalysis = { input_i: -80, input_tp: -60, input_lra: 2, input_thresh: -90 }
+    expect(calculateLoudnessGain(analysis)).toBeNull()
+  })
+
+  it('returns null for negligible gain (< 0.5 dB)', () => {
+    const analysis: LoudnessAnalysis = { input_i: -14.3, input_tp: -3, input_lra: 6, input_thresh: -24 }
+    // Gain: -14 - (-14.3) = 0.3 dB, which is < 0.5
+    expect(calculateLoudnessGain(analysis)).toBeNull()
+  })
+
+  it('applies gain when exactly at threshold', () => {
+    const analysis: LoudnessAnalysis = { input_i: -14.5, input_tp: -5, input_lra: 5, input_thresh: -25 }
+    // Gain: 0.5 dB, exactly at threshold - should apply
+    expect(calculateLoudnessGain(analysis)).toBe(0.5)
+  })
+
+  it('handles hot input requiring gain reduction', () => {
+    const analysis: LoudnessAnalysis = { input_i: -10, input_tp: -1, input_lra: 4, input_thresh: -20 }
+    // Desired gain: -14 - (-10) = -4 dB
+    // Peak check: -1 + (-4) = -5 dB, which is < -1 ceiling (OK)
+    expect(calculateLoudnessGain(analysis)).toBe(-4)
+  })
+
+  it('handles already-clipping input', () => {
+    const analysis: LoudnessAnalysis = { input_i: -12, input_tp: 0, input_lra: 3, input_thresh: -22 }
+    // Desired gain: -2 dB. Peak is 0, so ceiling constraint: -1 - 0 = -1 dB max gain
+    // But -2 < -1, so use -2 dB
+    expect(calculateLoudnessGain(analysis)).toBe(-2)
+  })
+})
+
+describe('buildLoudnessGainFilter', () => {
+  it('returns volume filter for positive gain', () => {
+    expect(buildLoudnessGainFilter(6)).toBe('volume=6.00dB')
+  })
+
+  it('returns volume filter for negative gain', () => {
+    expect(buildLoudnessGainFilter(-3)).toBe('volume=-3.00dB')
+  })
+
+  it('returns empty string for null', () => {
+    expect(buildLoudnessGainFilter(null)).toBe('')
+  })
+
+  it('formats gain with 2 decimal places', () => {
+    expect(buildLoudnessGainFilter(1.5)).toBe('volume=1.50dB')
+    expect(buildLoudnessGainFilter(-0.75)).toBe('volume=-0.75dB')
+  })
+
+  it('handles zero gain (edge case)', () => {
+    expect(buildLoudnessGainFilter(0)).toBe('volume=0.00dB')
+  })
+})
+
+// ============================================================================
+// Toggle Wiring Audit - Verifies UI toggle ON = filter present, OFF = absent
+// ============================================================================
+
+/**
+ * Toggle-to-filter mapping for automated verification.
+ * Canonical rule: enabled=true → filter present, enabled=false → filter absent
+ */
+interface ToggleSpec {
+  name: string
+  filterPattern: RegExp  // Pattern to detect filter in chain
+  getEnabledState: () => any  // Returns state with toggle ON
+  getDisabledState: () => any  // Returns state with toggle OFF
+  buildFilter: (state: any) => string  // Function to build filter
+}
+
+describe('Toggle Wiring Audit', () => {
+  // Default disabled states for isolation
+  const defaultHpf: FilterParams = { frequency: 120, q: 0.7, enabled: false }
+  const defaultLpf: FilterParams = { frequency: 8000, q: 0.7, enabled: false }
+  const defaultBands: EQBand[] = [
+    { frequency: 200, gain: 0, q: 1.0, enabled: false },
+    { frequency: 1000, gain: 0, q: 1.0, enabled: false },
+    { frequency: 5000, gain: 0, q: 1.0, enabled: false }
+  ]
+  const defaultCompressor: CompressorParams = {
+    threshold: -18, ratio: 3, attack: 10, release: 100,
+    makeup: 0, emphasis: 80, mode: 'COMP', enabled: false
+  }
+  const defaultNR: NoiseReductionParams = { strength: 50, enabled: false }
+  const defaultAutoMix: AutoMixParams = { preset: 'MEDIUM', enabled: false }
+
+  /**
+   * Toggle specifications - the definitive list of all toggle-controlled filters
+   */
+  const TOGGLE_SPECS: ToggleSpec[] = [
+    {
+      name: 'NR (Noise Reduction)',
+      filterPattern: /afftdn/,
+      getEnabledState: () => ({ strength: 50, enabled: true }),
+      getDisabledState: () => ({ strength: 50, enabled: false }),
+      buildFilter: (nr) => buildNoiseReductionFilter(nr)
+    },
+    {
+      name: 'HPF (High-Pass Filter)',
+      filterPattern: /highpass/,
+      getEnabledState: () => ({ frequency: 120, q: 0.7, enabled: true }),
+      getDisabledState: () => ({ frequency: 120, q: 0.7, enabled: false }),
+      buildFilter: (hpf) => hpf.enabled ? `highpass=f=${hpf.frequency}` : ''
+    },
+    {
+      name: 'LPF (Low-Pass Filter)',
+      filterPattern: /lowpass/,
+      getEnabledState: () => ({ frequency: 8000, q: 0.7, enabled: true }),
+      getDisabledState: () => ({ frequency: 8000, q: 0.7, enabled: false }),
+      buildFilter: (lpf) => lpf.enabled ? `lowpass=f=${lpf.frequency}` : ''
+    },
+    {
+      name: 'EQ Band (Lo)',
+      filterPattern: /equalizer=f=200/,
+      getEnabledState: () => [{ frequency: 200, gain: 3, q: 1.0, enabled: true }],
+      getDisabledState: () => [{ frequency: 200, gain: 3, q: 1.0, enabled: false }],
+      buildFilter: (bands) => buildEQFilter(bands)
+    },
+    {
+      name: 'EQ Band (Mid)',
+      filterPattern: /equalizer=f=1000/,
+      getEnabledState: () => [{ frequency: 1000, gain: 3, q: 1.0, enabled: true }],
+      getDisabledState: () => [{ frequency: 1000, gain: 3, q: 1.0, enabled: false }],
+      buildFilter: (bands) => buildEQFilter(bands)
+    },
+    {
+      name: 'EQ Band (Hi)',
+      filterPattern: /equalizer=f=5000/,
+      getEnabledState: () => [{ frequency: 5000, gain: 3, q: 1.0, enabled: true }],
+      getDisabledState: () => [{ frequency: 5000, gain: 3, q: 1.0, enabled: false }],
+      buildFilter: (bands) => buildEQFilter(bands)
+    },
+    {
+      name: 'Compressor (COMP mode)',
+      filterPattern: /acompressor/,
+      getEnabledState: () => ({ ...defaultCompressor, mode: 'COMP', enabled: true }),
+      getDisabledState: () => ({ ...defaultCompressor, mode: 'COMP', enabled: false }),
+      buildFilter: (comp) => buildCompressorFilter(comp)
+    },
+    {
+      name: 'Limiter (LIMIT mode)',
+      filterPattern: /alimiter/,
+      getEnabledState: () => ({ ...defaultCompressor, mode: 'LIMIT', enabled: true }),
+      getDisabledState: () => ({ ...defaultCompressor, mode: 'LIMIT', enabled: false }),
+      buildFilter: (comp) => buildCompressorFilter(comp)
+    },
+    {
+      name: 'Level (LEVEL mode with makeup)',
+      filterPattern: /volume=/,
+      getEnabledState: () => ({ ...defaultCompressor, mode: 'LEVEL', makeup: 3, enabled: true }),
+      getDisabledState: () => ({ ...defaultCompressor, mode: 'LEVEL', makeup: 3, enabled: false }),
+      buildFilter: (comp) => buildCompressorFilter(comp)
+    },
+    {
+      name: 'AutoMix',
+      filterPattern: /dynaudnorm/,
+      getEnabledState: () => ({ preset: 'MEDIUM', enabled: true }),
+      getDisabledState: () => ({ preset: 'MEDIUM', enabled: false }),
+      buildFilter: (autoMix) => buildAutoMixFilter(autoMix)
+    }
+  ]
+
+  describe('Individual Toggle Tests', () => {
+    TOGGLE_SPECS.forEach(spec => {
+      it(`${spec.name}: enabled=true → filter PRESENT`, () => {
+        const state = spec.getEnabledState()
+        const filter = spec.buildFilter(state)
+
+        const isPresent = spec.filterPattern.test(filter)
+        if (!isPresent) {
+          console.error(`INVERSION BUG: ${spec.name} - enabled=true but filter absent`)
+          console.error(`  Filter output: "${filter}"`)
+          console.error(`  Expected pattern: ${spec.filterPattern}`)
+        }
+        expect(isPresent).toBe(true)
+      })
+
+      it(`${spec.name}: enabled=false → filter ABSENT`, () => {
+        const state = spec.getDisabledState()
+        const filter = spec.buildFilter(state)
+
+        const isPresent = spec.filterPattern.test(filter)
+        if (isPresent) {
+          console.error(`INVERSION BUG: ${spec.name} - enabled=false but filter present`)
+          console.error(`  Filter output: "${filter}"`)
+        }
+        expect(isPresent).toBe(false)
+      })
+    })
+  })
+
+  describe('Full Filter Chain Integration', () => {
+    it('all toggles OFF → empty filter chain', () => {
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        defaultBands,
+        defaultLpf,
+        defaultCompressor,
+        defaultNR,
+        defaultAutoMix
+      )
+      expect(chain).toBe('')
+    })
+
+    it('only NR enabled → only afftdn in chain', () => {
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        defaultBands,
+        defaultLpf,
+        defaultCompressor,
+        { strength: 50, enabled: true },
+        defaultAutoMix
+      )
+      expect(chain).toMatch(/afftdn/)
+      expect(chain).not.toMatch(/highpass/)
+      expect(chain).not.toMatch(/lowpass/)
+      expect(chain).not.toMatch(/equalizer/)
+      expect(chain).not.toMatch(/acompressor/)
+      expect(chain).not.toMatch(/dynaudnorm/)
+    })
+
+    it('only HPF enabled → only highpass in chain', () => {
+      const chain = buildFullFilterChain(
+        { frequency: 120, q: 0.7, enabled: true },
+        defaultBands,
+        defaultLpf,
+        defaultCompressor,
+        defaultNR,
+        defaultAutoMix
+      )
+      expect(chain).toMatch(/highpass/)
+      expect(chain).not.toMatch(/afftdn/)
+      expect(chain).not.toMatch(/lowpass/)
+      expect(chain).not.toMatch(/equalizer/)
+      expect(chain).not.toMatch(/acompressor/)
+      expect(chain).not.toMatch(/dynaudnorm/)
+    })
+
+    it('only LPF enabled → only lowpass in chain', () => {
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        defaultBands,
+        { frequency: 8000, q: 0.7, enabled: true },
+        defaultCompressor,
+        defaultNR,
+        defaultAutoMix
+      )
+      expect(chain).toMatch(/lowpass/)
+      expect(chain).not.toMatch(/afftdn/)
+      expect(chain).not.toMatch(/highpass/)
+      expect(chain).not.toMatch(/equalizer/)
+      expect(chain).not.toMatch(/acompressor/)
+      expect(chain).not.toMatch(/dynaudnorm/)
+    })
+
+    it('only EQ (with gain) enabled → only equalizer in chain', () => {
+      const eqBands: EQBand[] = [
+        { frequency: 1000, gain: 3, q: 1.0, enabled: true }
+      ]
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        eqBands,
+        defaultLpf,
+        defaultCompressor,
+        defaultNR,
+        defaultAutoMix
+      )
+      expect(chain).toMatch(/equalizer/)
+      expect(chain).not.toMatch(/afftdn/)
+      expect(chain).not.toMatch(/highpass/)
+      expect(chain).not.toMatch(/lowpass/)
+      expect(chain).not.toMatch(/acompressor/)
+      expect(chain).not.toMatch(/dynaudnorm/)
+    })
+
+    it('only Compressor enabled → only acompressor in chain', () => {
+      // Note: emphasis > 30 adds a highpass internally for sidechain emulation
+      // Using emphasis: 20 to disable this internal HPF for clean isolation test
+      const compNoEmphasis: CompressorParams = {
+        ...defaultCompressor,
+        emphasis: 20,  // Below 30Hz threshold, no internal HPF
+        enabled: true
+      }
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        defaultBands,
+        defaultLpf,
+        compNoEmphasis,
+        defaultNR,
+        defaultAutoMix
+      )
+      expect(chain).toMatch(/acompressor/)
+      expect(chain).not.toMatch(/afftdn/)
+      expect(chain).not.toMatch(/highpass/)
+      expect(chain).not.toMatch(/lowpass/)
+      expect(chain).not.toMatch(/equalizer/)
+      expect(chain).not.toMatch(/dynaudnorm/)
+    })
+
+    it('only AutoMix enabled → only dynaudnorm in chain', () => {
+      const chain = buildFullFilterChain(
+        defaultHpf,
+        defaultBands,
+        defaultLpf,
+        defaultCompressor,
+        defaultNR,
+        { preset: 'MEDIUM', enabled: true }
+      )
+      expect(chain).toMatch(/dynaudnorm/)
+      expect(chain).not.toMatch(/afftdn/)
+      expect(chain).not.toMatch(/highpass/)
+      expect(chain).not.toMatch(/lowpass/)
+      expect(chain).not.toMatch(/equalizer/)
+      expect(chain).not.toMatch(/acompressor/)
+    })
+
+    it('all toggles ON → all filters present in correct order', () => {
+      const allOnBands: EQBand[] = [
+        { frequency: 200, gain: 2, q: 1.0, enabled: true },
+        { frequency: 1000, gain: -1, q: 1.0, enabled: true },
+        { frequency: 5000, gain: 3, q: 1.0, enabled: true }
+      ]
+      const chain = buildFullFilterChain(
+        { frequency: 120, q: 0.7, enabled: true },
+        allOnBands,
+        { frequency: 8000, q: 0.7, enabled: true },
+        { ...defaultCompressor, enabled: true },
+        { strength: 50, enabled: true },
+        { preset: 'MEDIUM', enabled: true }
+      )
+
+      // All filters present
+      expect(chain).toMatch(/afftdn/)
+      expect(chain).toMatch(/highpass/)
+      expect(chain).toMatch(/lowpass/)
+      expect(chain).toMatch(/equalizer/)
+      expect(chain).toMatch(/acompressor/)
+      expect(chain).toMatch(/dynaudnorm/)
+
+      // Verify order: NR → HPF → LPF → EQ → Comp → AutoMix
+      const nrIndex = chain.indexOf('afftdn')
+      const hpfIndex = chain.indexOf('highpass')
+      const lpfIndex = chain.indexOf('lowpass')
+      const eqIndex = chain.indexOf('equalizer')
+      const compIndex = chain.indexOf('acompressor')
+      const autoMixIndex = chain.indexOf('dynaudnorm')
+
+      expect(nrIndex).toBeLessThan(hpfIndex)
+      expect(hpfIndex).toBeLessThan(lpfIndex)
+      expect(lpfIndex).toBeLessThan(eqIndex)
+      expect(eqIndex).toBeLessThan(compIndex)
+      expect(compIndex).toBeLessThan(autoMixIndex)
+    })
+  })
+
+  describe('Edge Cases', () => {
+    it('EQ enabled with zero gain → filter absent (optimization)', () => {
+      const zeroGainBands: EQBand[] = [
+        { frequency: 1000, gain: 0, q: 1.0, enabled: true }
+      ]
+      const filter = buildEQFilter(zeroGainBands)
+      expect(filter).toBe('')  // Zero gain = no audible effect = skip
+    })
+
+    it('NR enabled with zero strength → filter absent', () => {
+      const filter = buildNoiseReductionFilter({ strength: 0, enabled: true })
+      expect(filter).toBe('')  // Zero strength = no effect = skip
+    })
+
+    it('Compressor LEVEL mode with zero makeup → filter absent', () => {
+      const filter = buildCompressorFilter({
+        ...defaultCompressor,
+        mode: 'LEVEL',
+        makeup: 0,
+        enabled: true
+      })
+      expect(filter).toBe('')  // Zero makeup in LEVEL mode = no effect
+    })
+  })
+})

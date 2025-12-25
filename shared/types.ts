@@ -77,3 +77,27 @@ export interface JobProgressEvent {
   durationSeconds?: number   // Total duration (if known)
   phase?: string             // e.g., "original-preview", "processed-preview"
 }
+
+/**
+ * Loudness analysis result from FFmpeg loudnorm filter (analysis mode).
+ * All values in EBU R128 units.
+ */
+export interface LoudnessAnalysis {
+  input_i: number      // Integrated LUFS
+  input_tp: number     // True peak dBTP
+  input_lra: number    // Loudness range LU
+  input_thresh: number // Threshold
+}
+
+/**
+ * Constants for loudness normalization.
+ * Hidden from UI - always-on final mastering stage.
+ */
+export const LOUDNESS_CONFIG = {
+  TARGET_LUFS: -14,        // YouTube/Spotify standard
+  TRUE_PEAK_CEILING: -1,   // dBTP ceiling to prevent clipping
+  MAX_GAIN_UP: 12,         // Maximum gain increase (dB)
+  MAX_GAIN_DOWN: -6,       // Maximum gain decrease (dB)
+  SILENCE_THRESHOLD: -70,  // Skip if quieter than this (LUFS)
+  NEGLIGIBLE_GAIN: 0.5,    // Skip if gain is smaller than this (dB)
+} as const
