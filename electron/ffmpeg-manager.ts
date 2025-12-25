@@ -338,12 +338,14 @@ function emitTerminalState(job: FFmpegJob, status: JobStatus, percent: number | 
 /**
  * Probe media file metadata using ffprobe with structured JSON output.
  * Much faster and more reliable than parsing ffmpeg stderr.
+ * Includes timeout protection (30s default) to prevent hung processes.
  *
  * @param filePath Absolute path to media file (must be validated first)
+ * @param timeoutMs Timeout in milliseconds (default: 30 seconds)
  * @returns Promise resolving to parsed ffprobe JSON data
  */
-export async function probeMediaMetadata(filePath: string): Promise<FFprobeResult> {
-  return new Promise((resolve, reject) => {
+export async function probeMediaMetadata(filePath: string, timeoutMs: number = 30000): Promise<FFprobeResult> {
+  const probePromise = new Promise<FFprobeResult>((resolve, reject) => {
     const args = [
       '-v', 'quiet',
       '-print_format', 'json',
@@ -357,6 +359,22 @@ export async function probeMediaMetadata(filePath: string): Promise<FFprobeResul
 
     let stdout = ''
     let stderr = ''
+    let resolved = false
+
+    const cleanup = () => {
+      if (proc && !proc.killed) {
+        try {
+          proc.kill('SIGTERM')
+          setTimeout(() => {
+            if (proc && !proc.killed) {
+              proc.kill('SIGKILL')
+            }
+          }, 1000)
+        } catch (err) {
+          console.error('[ffprobe] Failed to kill process:', err)
+        }
+      }
+    }
 
     proc.stdout.on('data', (data) => {
       stdout += data.toString()
@@ -367,6 +385,9 @@ export async function probeMediaMetadata(filePath: string): Promise<FFprobeResul
     })
 
     proc.on('close', (code) => {
+      if (resolved) return
+      resolved = true
+
       if (code !== 0) {
         reject(new Error(`ffprobe exited with code ${code}: ${stderr}`))
         return
@@ -382,9 +403,20 @@ export async function probeMediaMetadata(filePath: string): Promise<FFprobeResul
     })
 
     proc.on('error', (err) => {
+      if (resolved) return
+      resolved = true
+      cleanup()
       reject(new Error(`Failed to spawn ffprobe: ${err.message}`))
     })
   })
+
+  const timeoutPromise = new Promise<FFprobeResult>((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`ffprobe operation timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
+  })
+
+  return Promise.race([probePromise, timeoutPromise])
 }
 
 /**
