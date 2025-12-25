@@ -5,6 +5,7 @@
 import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
+import { validateMediaPath } from './path-validation'
 
 /**
  * Extract mono WAV from video file
@@ -14,6 +15,12 @@ export async function extractAudioForASR(
   videoPath: string,
   outputDir: string
 ): Promise<string> {
+  // Validate input path before processing
+  const validationResult = validateMediaPath(videoPath)
+  if (!validationResult.ok) {
+    throw new Error(`Invalid video path: ${validationResult.message}`)
+  }
+
   const baseName = path.basename(videoPath, path.extname(videoPath))
   const outputPath = path.join(outputDir, `${baseName}-audio.wav`)
 
