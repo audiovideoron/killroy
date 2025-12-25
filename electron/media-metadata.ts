@@ -49,7 +49,11 @@ export async function extractVideoMetadata(filePath: string): Promise<VideoAsset
     throw new Error(validation.message)
   }
 
-  return new Promise((resolve, reject) => {
+  const TIMEOUT_MS = 30000 // 30 seconds
+
+  let proc: ReturnType<typeof spawn> | null = null
+
+  const metadataPromise = new Promise<VideoAsset>((resolve, reject) => {
     const args = [
       '-v', 'error',
       '-show_streams',
@@ -58,7 +62,7 @@ export async function extractVideoMetadata(filePath: string): Promise<VideoAsset
       filePath
     ]
 
-    const proc = spawn('ffprobe', args)
+    proc = spawn('ffprobe', args)
     let stdout = ''
     let stderr = ''
 
@@ -131,4 +135,15 @@ export async function extractVideoMetadata(filePath: string): Promise<VideoAsset
       reject(new Error(`Failed to spawn ffprobe: ${err.message}`))
     })
   })
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM')
+      }
+      reject(new Error(`ffprobe timed out after ${TIMEOUT_MS}ms`))
+    }, TIMEOUT_MS)
+  })
+
+  return Promise.race([metadataPromise, timeoutPromise])
 }
