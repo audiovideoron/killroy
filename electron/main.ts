@@ -250,7 +250,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
-    // Render processed preview with full filter chain (HPF -> NR -> EQ -> LPF -> AutoMix -> Compressor)
+    // Render processed preview with full filter chain (NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix)
     const filterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
 
     // Build attempts with automatic copy → re-encode fallback
