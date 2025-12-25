@@ -5,6 +5,7 @@
 import { spawn } from 'child_process'
 import type { VideoAsset } from '../shared/editor-types'
 import { v4 as uuidv4 } from 'uuid'
+import { validateMediaPath } from './path-validation'
 
 interface FfprobeStream {
   codec_type?: string
@@ -42,6 +43,12 @@ function parseFrameRate(rFrameRate: string): number {
  * Extract video metadata using ffprobe
  */
 export async function extractVideoMetadata(filePath: string): Promise<VideoAsset> {
+  // Validate path before processing
+  const validation = validateMediaPath(filePath)
+  if (!validation.ok) {
+    throw new Error(validation.message)
+  }
+
   return new Promise((resolve, reject) => {
     const args = [
       '-v', 'error',
