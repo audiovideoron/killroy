@@ -4,38 +4,31 @@ import type { QuietCandidate } from '../../shared/types'
 /**
  * Noise Sampling Component
  *
- * Implements deterministic auto-selection with silent advancement on rejection.
- * See: docs/noise-sample-auto-selection-investigation.md
+ * Simple filter toggle that auto-detects and auto-selects a noise sample.
+ * No transport controls - all auditioning happens through global Preview.
  *
  * Behavior:
  * - Toggle ON: Auto-detect quiet regions, auto-select top-ranked candidate
- * - Reject: Silently advance to next-ranked candidate (no visible "Next" button)
  * - Toggle OFF: Clear noise sample region
+ * - Read-only display of active sample window when enabled
  */
 
 interface NoiseSamplingProps {
   filePath: string | null
   onNoiseSampleAccepted: (candidate: QuietCandidate) => void
-  onPreviewCandidate: (candidate: QuietCandidate) => void
   onNoiseSamplingDisabled: () => void
 }
 
-type DetectionStatus = 'idle' | 'detecting' | 'active' | 'exhausted' | 'none'
+type DetectionStatus = 'idle' | 'detecting' | 'active' | 'none'
 
 export function NoiseSampling({
   filePath,
   onNoiseSampleAccepted,
-  onPreviewCandidate,
   onNoiseSamplingDisabled
 }: NoiseSamplingProps) {
   const [enabled, setEnabled] = useState(false)
   const [status, setStatus] = useState<DetectionStatus>('idle')
-  const [candidates, setCandidates] = useState<QuietCandidate[]>([])
-  const [candidateIndex, setCandidateIndex] = useState(0)
-
-  const currentCandidate = candidates.length > 0 && candidateIndex < candidates.length
-    ? candidates[candidateIndex]
-    : null
+  const [currentCandidate, setCurrentCandidate] = useState<QuietCandidate | null>(null)
 
   // Auto-detect when enabled and file is available
   useEffect(() => {
@@ -43,16 +36,15 @@ export function NoiseSampling({
 
     const detectAndSelect = async () => {
       setStatus('detecting')
-      setCandidates([])
-      setCandidateIndex(0)
+      setCurrentCandidate(null)
 
       try {
         const result = await window.electronAPI.detectQuietCandidates(filePath)
         if (result.candidates.length > 0) {
-          setCandidates(result.candidates)
+          const topCandidate = result.candidates[0]
+          setCurrentCandidate(topCandidate)
           setStatus('active')
-          // Auto-select top-ranked candidate (index 0)
-          onNoiseSampleAccepted(result.candidates[0])
+          onNoiseSampleAccepted(topCandidate)
         } else {
           setStatus('none')
         }
@@ -75,40 +67,15 @@ export function NoiseSampling({
   const handleDisable = useCallback(() => {
     setEnabled(false)
     setStatus('idle')
-    setCandidates([])
-    setCandidateIndex(0)
+    setCurrentCandidate(null)
     onNoiseSamplingDisabled()
   }, [onNoiseSamplingDisabled])
-
-  // Handle rejection - silently advance to next candidate
-  // Per investigation doc: "automatic advancement through ranked candidates on rejection"
-  const handleReject = useCallback(() => {
-    if (candidates.length === 0) return
-
-    const nextIndex = candidateIndex + 1
-    if (nextIndex >= candidates.length) {
-      // All candidates exhausted
-      setStatus('exhausted')
-      return
-    }
-
-    setCandidateIndex(nextIndex)
-    // Auto-select next candidate
-    onNoiseSampleAccepted(candidates[nextIndex])
-  }, [candidates, candidateIndex, onNoiseSampleAccepted])
-
-  // Handle preview of current candidate
-  const handlePreview = useCallback(() => {
-    if (!currentCandidate) return
-    onPreviewCandidate(currentCandidate)
-  }, [currentCandidate, onPreviewCandidate])
 
   // Reset when file changes
   useEffect(() => {
     setEnabled(false)
     setStatus('idle')
-    setCandidates([])
-    setCandidateIndex(0)
+    setCurrentCandidate(null)
   }, [filePath])
 
   const formatTime = (ms: number): string => {
@@ -116,11 +83,6 @@ export function NoiseSampling({
     const mins = Math.floor(seconds / 60)
     const secs = (seconds % 60).toFixed(1)
     return mins > 0 ? `${mins}:${secs.padStart(4, '0')}` : `${secs}s`
-  }
-
-  const formatDuration = (candidate: QuietCandidate): string => {
-    const durationMs = candidate.endMs - candidate.startMs
-    return formatTime(durationMs)
   }
 
   // Toggle button style
@@ -138,18 +100,6 @@ export function NoiseSampling({
     color: enabled ? '#fff' : '#ccc',
     boxShadow: '0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.08)',
     opacity: filePath ? 1 : 0.5
-  }
-
-  const smallButtonStyle = {
-    padding: '4px 10px',
-    fontSize: 9,
-    fontWeight: 600 as const,
-    border: '1px solid #333',
-    borderRadius: 2,
-    cursor: 'pointer',
-    background: 'linear-gradient(180deg, #4a4a4a 0%, #3a3a3a 100%)',
-    color: '#ccc',
-    boxShadow: '0 1px 2px rgba(0,0,0,0.3)'
   }
 
   return (
@@ -193,43 +143,15 @@ export function NoiseSampling({
         </div>
       )}
 
-      {status === 'exhausted' && (
-        <div style={{ fontSize: 11, color: '#f59e0b', padding: '4px 0' }}>
-          All candidates rejected. Disable to reset.
-        </div>
-      )}
-
-      {/* Active Selection */}
+      {/* Read-only display of active sample window */}
       {status === 'active' && currentCandidate && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 11, color: '#4caf50' }}>
-            Noise sample:
+            Auto sample:
           </span>
           <span style={{ fontSize: 11, color: '#4fc3f7', fontFamily: 'monospace' }}>
             {formatTime(currentCandidate.startMs)} - {formatTime(currentCandidate.endMs)}
           </span>
-          <span style={{ fontSize: 10, color: '#666' }}>
-            ({formatDuration(currentCandidate)})
-          </span>
-
-          <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-            <button onClick={handlePreview} style={smallButtonStyle}>
-              Preview
-            </button>
-            {candidates.length > 1 && candidateIndex < candidates.length - 1 && (
-              <button
-                onClick={handleReject}
-                style={{
-                  ...smallButtonStyle,
-                  border: '1px solid #c62828',
-                  background: 'linear-gradient(180deg, #d32f2f 0%, #c62828 100%)',
-                  color: '#fff'
-                }}
-              >
-                Reject
-              </button>
-            )}
-          </div>
         </div>
       )}
     </div>

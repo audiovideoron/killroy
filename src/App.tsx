@@ -90,22 +90,14 @@ function App() {
     console.log('[App] Noise sampling disabled, region cleared')
   }, [])
 
-  // SHARED PREVIEW PIPELINE - both "Preview" button and "Noise Sampler Preview" use this
-  const requestPreview = useCallback(async (params: { startSec: number; durationSec: number; reason: 'main' | 'noise-sampler' }) => {
+  // Global Preview pipeline - single path for all auditioning
+  const requestPreview = useCallback(async (params: { startSec: number; durationSec: number }) => {
     if (!filePath) return
 
-    const { startSec, durationSec, reason } = params
+    const { startSec, durationSec } = params
     console.log('[requestPreview] ========== START ==========')
-    console.log('[requestPreview] reason:', reason)
     console.log('[requestPreview] timing:', { startSec, durationSec })
     console.log('[requestPreview] inputPath:', filePath)
-
-    // Force-enable NR for noise-sampler preview (local override, does not mutate global state)
-    const effectiveNoiseReduction = reason === 'noise-sampler'
-      ? { ...noiseReduction, enabled: true }
-      : noiseReduction
-
-    console.log('[requestPreview] noiseReduction:', { global: noiseReduction.enabled, effective: effectiveNoiseReduction.enabled })
 
     setStatus('rendering')
     setErrorMsg('')
@@ -119,7 +111,7 @@ function App() {
         hpf,
         lpf,
         compressor,
-        noiseReduction: effectiveNoiseReduction,
+        noiseReduction,
         autoMix
       })
 
@@ -135,7 +127,6 @@ function App() {
         setStatus('done')
 
         console.log('[requestPreview] ========== COMPLETE ==========')
-        console.log('[requestPreview] reason:', reason)
         console.log('[requestPreview] playing URL directly:', finalProcUrl)
 
         // Play the URL directly (bypasses stale props from React async state)
@@ -156,22 +147,11 @@ function App() {
     }
   }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix])
 
-  // "Preview" button handler - delegates to shared pipeline
+  // "Preview" button handler - delegates to global preview pipeline
   // Uses fixed PREVIEW_DURATION_SEC per investigation doc
   const handleRender = useCallback(async () => {
-    await requestPreview({ startSec: startTime, durationSec: PREVIEW_DURATION_SEC, reason: 'main' })
+    await requestPreview({ startSec: startTime, durationSec: PREVIEW_DURATION_SEC })
   }, [requestPreview, startTime])
-
-  // Handle noise sample candidate preview - USES SHARED PREVIEW PIPELINE
-  const handlePreviewCandidate = useCallback(async (candidate: QuietCandidate) => {
-    const startSec = candidate.startMs / 1000
-    const durationSec = (candidate.endMs - candidate.startMs) / 1000
-
-    console.log('[handlePreviewCandidate] candidate:', { startMs: candidate.startMs, endMs: candidate.endMs })
-    console.log('[handlePreviewCandidate] delegating to requestPreview with:', { startSec, durationSec })
-
-    await requestPreview({ startSec, durationSec, reason: 'noise-sampler' })
-  }, [requestPreview])
 
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
@@ -402,7 +382,6 @@ function App() {
         <NoiseSampling
           filePath={filePath}
           onNoiseSampleAccepted={handleNoiseSampleAccepted}
-          onPreviewCandidate={handlePreviewCandidate}
           onNoiseSamplingDisabled={handleNoiseSamplingDisabled}
         />
       </div>
