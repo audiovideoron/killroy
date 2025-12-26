@@ -10,9 +10,10 @@ import type {
   AutoMixParams,
   JobProgressEvent,
   JobStatus,
-  LoudnessAnalysis
+  LoudnessAnalysis,
+  QuietCandidate
 } from '../shared/types'
-import { LOUDNESS_CONFIG } from '../shared/types'
+import { LOUDNESS_CONFIG, QUIET_DETECTION_CONFIG } from '../shared/types'
 
 /**
  * FFmpeg job tracking for lifecycle management.
@@ -1134,4 +1135,261 @@ export function cancelFFmpegJob(jobId: string, mainWindow: BrowserWindow | null)
     success: true,
     message: `Job ${jobId} cancelled successfully`
   }
+}
+
+/**
+ * Parse FFmpeg silencedetect output into quiet region segments.
+ *
+ * silencedetect outputs lines like:
+ *   [silencedetect @ 0x...] silence_start: 1.234
+ *   [silencedetect @ 0x...] silence_end: 2.567 | silence_duration: 1.333
+ *
+ * @param stderr FFmpeg stderr output containing silencedetect results
+ * @returns Array of { startMs, endMs } segments
+ */
+export function parseSilenceDetectOutput(stderr: string): QuietCandidate[] {
+  const candidates: QuietCandidate[] = []
+  const lines = stderr.split('\n')
+
+  let currentStart: number | null = null
+
+  for (const line of lines) {
+    // Match silence_start: <seconds>
+    const startMatch = line.match(/silence_start:\s*([\d.]+)/)
+    if (startMatch) {
+      currentStart = parseFloat(startMatch[1])
+      continue
+    }
+
+    // Match silence_end: <seconds>
+    const endMatch = line.match(/silence_end:\s*([\d.]+)/)
+    if (endMatch && currentStart !== null) {
+      const endSec = parseFloat(endMatch[1])
+      candidates.push({
+        startMs: Math.round(currentStart * 1000),
+        endMs: Math.round(endSec * 1000)
+      })
+      currentStart = null
+    }
+  }
+
+  return candidates
+}
+
+/**
+ * Sort quiet candidates by duration (DESC), then by start time (ASC).
+ *
+ * @param candidates Array of quiet candidates
+ * @returns Sorted array (new array, original unchanged)
+ */
+export function sortQuietCandidates(candidates: QuietCandidate[]): QuietCandidate[] {
+  return [...candidates].sort((a, b) => {
+    const durationA = a.endMs - a.startMs
+    const durationB = b.endMs - b.startMs
+
+    // Primary: duration DESC
+    if (durationB !== durationA) {
+      return durationB - durationA
+    }
+
+    // Tie-break: start ASC
+    return a.startMs - b.startMs
+  })
+}
+
+/**
+ * Run volumedetect analysis on audio file for diagnostic purposes.
+ * Returns mean and max volume levels.
+ */
+async function analyzeVolumeLevels(inputPath: string): Promise<{ mean_volume: string; max_volume: string } | null> {
+  return new Promise((resolve) => {
+    const args = [
+      '-i', inputPath,
+      '-af', 'volumedetect',
+      '-f', 'null',
+      '-'
+    ]
+
+    const proc = spawn('ffmpeg', args)
+    let stderr = ''
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', () => {
+      // Parse volumedetect output
+      const meanMatch = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/)
+      const maxMatch = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/)
+
+      if (meanMatch && maxMatch) {
+        resolve({
+          mean_volume: meanMatch[1],
+          max_volume: maxMatch[1]
+        })
+      } else {
+        resolve(null)
+      }
+    })
+
+    proc.on('error', () => resolve(null))
+
+    // Timeout after 30s
+    setTimeout(() => {
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM')
+      }
+      resolve(null)
+    }, 30000)
+  })
+}
+
+/**
+ * Detect quiet regions in audio using FFmpeg silencedetect filter.
+ *
+ * @param inputPath Path to input media file
+ * @param timeoutMs Timeout in milliseconds (default: 60s)
+ * @returns Promise resolving to sorted, capped array of quiet candidates
+ */
+export async function detectQuietCandidates(
+  inputPath: string,
+  timeoutMs: number = 60000
+): Promise<QuietCandidate[]> {
+  const {
+    PROOF_MODE,
+    PROOF_THRESHOLD_DB,
+    PROOF_MIN_DURATION_SEC,
+    THRESHOLD_OFFSET_DB,
+    THRESHOLD_MIN_DB,
+    THRESHOLD_MAX_DB,
+    MIN_DURATION_SEC,
+    MAX_CANDIDATES
+  } = QUIET_DETECTION_CONFIG
+
+  console.log('[silencedetect] ========== DETECTION START ==========')
+  console.log('[silencedetect] Input:', inputPath)
+
+  let silenceThreshold: number
+  let minDuration: number
+
+  if (PROOF_MODE) {
+    // === PROOF MODE: Maximally permissive settings ===
+    console.log('[silencedetect] *** PROOF MODE ENABLED ***')
+    silenceThreshold = PROOF_THRESHOLD_DB
+    minDuration = PROOF_MIN_DURATION_SEC
+    console.log('[silencedetect] Using proof mode settings:')
+    console.log('[silencedetect]   threshold:', silenceThreshold, 'dB')
+    console.log('[silencedetect]   min_duration:', minDuration, 's')
+  } else {
+    // === Normal mode: Dynamic threshold based on content ===
+    console.log('[silencedetect] Running volumedetect analysis...')
+
+    const volumeInfo = await analyzeVolumeLevels(inputPath)
+    if (!volumeInfo) {
+      console.log('[silencedetect] volumedetect failed - cannot compute dynamic threshold')
+      console.log('[silencedetect] ========== DETECTION END ==========')
+      return []
+    }
+
+    const meanVolume = parseFloat(volumeInfo.mean_volume)
+    console.log('[silencedetect] Volume analysis:')
+    console.log('[silencedetect]   mean_volume:', volumeInfo.mean_volume, 'dB')
+    console.log('[silencedetect]   max_volume:', volumeInfo.max_volume, 'dB')
+
+    // threshold = mean_volume - offset, clamped to [min, max]
+    const rawThreshold = meanVolume - THRESHOLD_OFFSET_DB
+    silenceThreshold = Math.max(THRESHOLD_MIN_DB, Math.min(THRESHOLD_MAX_DB, rawThreshold))
+    minDuration = MIN_DURATION_SEC
+
+    console.log('[silencedetect] Dynamic threshold:')
+    console.log('[silencedetect]   formula: mean_volume - offset =', meanVolume, '-', THRESHOLD_OFFSET_DB, '=', rawThreshold, 'dB')
+    console.log('[silencedetect]   clamped to [', THRESHOLD_MIN_DB, ',', THRESHOLD_MAX_DB, ']:', silenceThreshold, 'dB')
+    console.log('[silencedetect]   min_duration:', minDuration, 's')
+  }
+
+  // === Run silencedetect ===
+  const args = [
+    '-i', inputPath,
+    '-af', `silencedetect=noise=${silenceThreshold}dB:d=${minDuration}`,
+    '-f', 'null',
+    '-'
+  ]
+
+  const fullCommand = 'ffmpeg ' + args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')
+  console.log('[silencedetect] Command:', fullCommand)
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', args)
+    let stderr = ''
+    let resolved = false
+
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true
+        if (proc && !proc.killed) {
+          try {
+            proc.kill('SIGTERM')
+          } catch (err) {
+            // Ignore kill errors
+          }
+        }
+      }
+    }
+
+    // Timeout protection
+    const timeoutHandle = setTimeout(() => {
+      console.warn('[silencedetect] Detection timed out after', timeoutMs, 'ms')
+      cleanup()
+      resolve([])  // Return empty on timeout
+    }, timeoutMs)
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', (code) => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeoutHandle)
+
+      console.log('[silencedetect] FFmpeg exit code:', code)
+
+      if (code !== 0) {
+        console.warn('[silencedetect] Detection exited with code:', code)
+        // Don't reject - return empty array on failure
+        resolve([])
+        return
+      }
+
+      // Parse silencedetect output
+      const rawCandidates = parseSilenceDetectOutput(stderr)
+
+      // Sort by duration DESC, start ASC
+      const sorted = sortQuietCandidates(rawCandidates)
+
+      // Cap to MAX_CANDIDATES
+      const capped = sorted.slice(0, MAX_CANDIDATES)
+
+      console.log('[silencedetect] Found', rawCandidates.length, 'quiet regions, returning top', capped.length)
+      if (capped.length > 0) {
+        console.log('[silencedetect] Top candidates (ms):', capped.map(c => `${c.startMs}-${c.endMs}`).join(', '))
+      } else if (PROOF_MODE) {
+        console.log('[silencedetect] *** PROOF MODE FAILED - 0 candidates ***')
+        console.log('[silencedetect] STDERR (last 30 lines):')
+        const stderrLines = stderr.split('\n')
+        stderrLines.slice(-30).forEach(l => console.log('[silencedetect]  ', l))
+      }
+      console.log('[silencedetect] ========== DETECTION END ==========')
+
+      resolve(capped)
+    })
+
+    proc.on('error', (err) => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timeoutHandle)
+      console.error('[silencedetect] Spawn error:', err)
+      resolve([])  // Return empty on spawn error
+    })
+  })
 }

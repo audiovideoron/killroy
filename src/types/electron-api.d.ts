@@ -3,7 +3,8 @@ import type {
   FilterParams,
   CompressorParams,
   NoiseReductionParams,
-  RenderResult
+  RenderResult,
+  QuietCandidatesResult
 } from '../../shared/types'
 import type { TranscriptV1, EdlV1 } from '../../shared/editor-types'
 
@@ -26,6 +27,7 @@ declare global {
       renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
       saveDialog: (defaultPath: string) => Promise<string | null>
       cancelRender: (jobId: string) => Promise<{ cancelled: boolean; message: string }>
+      detectQuietCandidates: (filePath: string) => Promise<QuietCandidatesResult>
     }
   }
 }

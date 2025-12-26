@@ -27,6 +27,7 @@ import {
   analyzeLoudness,
   calculateLoudnessGain,
   buildLoudnessGainFilter,
+  detectQuietCandidates,
   type RenderAttempt
 } from './ffmpeg-manager'
 import {
@@ -365,7 +366,9 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 
 ipcMain.handle('get-file-url', (_event, filePath: string) => {
   // Use custom appfile:// protocol to bypass file:// restrictions in dev mode
-  return `appfile://${filePath}`
+  const url = `appfile://${filePath}`
+  console.log('[get-file-url] Returning URL:', url)
+  return url
 })
 
 /**
@@ -441,5 +444,23 @@ ipcMain.handle('render-final', async (_event, filePath: string, edl: EdlV1, outp
       success: false,
       error: String(err)
     }
+  }
+})
+
+// Detect quiet region candidates for noise sampling
+ipcMain.handle('detect-quiet-candidates', async (_event, filePath: string) => {
+  try {
+    // Validate input path
+    const validation = validateMediaPath(filePath)
+    if (!validation.ok) {
+      console.error('[detect-quiet-candidates] Validation failed:', validation.message)
+      return { candidates: [] }
+    }
+
+    const candidates = await detectQuietCandidates(filePath)
+    return { candidates }
+  } catch (err) {
+    console.error('[detect-quiet-candidates] Error:', err)
+    return { candidates: [] }
   }
 })

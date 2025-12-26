@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { RenderOptions, RenderResult, JobProgressEvent } from '../shared/types'
+import type { RenderOptions, RenderResult, JobProgressEvent, QuietCandidatesResult } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 
 // Re-export types for backwards compatibility
@@ -11,7 +11,9 @@ export type {
   RenderOptions,
   RenderResult,
   JobProgressEvent,
-  JobStatus
+  JobStatus,
+  QuietCandidate,
+  QuietCandidatesResult
 } from '../shared/types'
 
 export type {
@@ -45,5 +47,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('render-final', filePath, edl, outputPath),
 
   saveDialog: (defaultPath: string): Promise<string | null> =>
-    ipcRenderer.invoke('save-dialog', defaultPath)
+    ipcRenderer.invoke('save-dialog', defaultPath),
+
+  detectQuietCandidates: (filePath: string): Promise<QuietCandidatesResult> =>
+    ipcRenderer.invoke('detect-quiet-candidates', filePath)
 })

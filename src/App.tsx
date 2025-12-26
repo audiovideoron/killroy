@@ -4,17 +4,24 @@ import { TranscriptPane } from './components/TranscriptPane'
 import { JobProgressBanner } from './components/JobProgressBanner'
 import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview'
 import { SourceControls } from './components/SourceControls'
+import { NoiseSampling } from './components/NoiseSampling'
 import { useJobProgress } from './hooks/useJobProgress'
-import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoMixParams, AutoMixPreset } from '../shared/types'
+import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 import './types/electron-api.d'
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
 
+/**
+ * Fixed preview duration in seconds.
+ * Per investigation doc: "Preview renders a fixed default duration (~10 seconds)"
+ * See: docs/noise-sample-auto-selection-investigation.md
+ */
+const PREVIEW_DURATION_SEC = 10
+
 function App() {
   const [filePath, setFilePath] = useState<string | null>(null)
   const [startTime, setStartTime] = useState(0)
-  const [duration, setDuration] = useState(15)
   const [status, setStatus] = useState<Status>('idle')
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -55,16 +62,116 @@ function App() {
     enabled: false
   })
 
+  // Noise sampling region (from quiet candidate detection)
+  const [noiseSampleRegion, setNoiseSampleRegion] = useState<QuietCandidate | null>(null)
+
   // Dirty-marking wrappers for all audio parameters
   // Any change to render configuration marks processed audio as stale
   const markDirtyAndSetStartTime = useCallback((v: number) => { setProcessedDirty(true); setStartTime(v) }, [])
-  const markDirtyAndSetDuration = useCallback((v: number) => { setProcessedDirty(true); setDuration(v) }, [])
   const markDirtyAndSetBands = useCallback((updater: (prev: EQBand[]) => EQBand[]) => { setProcessedDirty(true); setBands(updater) }, [])
   const markDirtyAndSetHpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setHpf(v) }, [])
   const markDirtyAndSetLpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setLpf(v) }, [])
   const markDirtyAndSetCompressor = useCallback((v: CompressorParams | ((prev: CompressorParams) => CompressorParams)) => { setProcessedDirty(true); setCompressor(v) }, [])
   const markDirtyAndSetNoiseReduction = useCallback((v: NoiseReductionParams) => { setProcessedDirty(true); setNoiseReduction(v) }, [])
   const markDirtyAndSetAutoMix = useCallback((v: AutoMixParams) => { setProcessedDirty(true); setAutoMix(v) }, [])
+
+  // Handle noise sample region acceptance
+  const handleNoiseSampleAccepted = useCallback((candidate: QuietCandidate) => {
+    setNoiseSampleRegion(candidate)
+    setProcessedDirty(true)  // Noise sample change invalidates processed audio
+    console.log('[App] Noise sample region accepted:', candidate)
+    // Note: The actual noise profile computation will be added in the noise sampling backend stage
+  }, [])
+
+  // Handle noise sampling disabled - clears the noise sample region
+  const handleNoiseSamplingDisabled = useCallback(() => {
+    setNoiseSampleRegion(null)
+    setProcessedDirty(true)  // Noise sample removal invalidates processed audio
+    console.log('[App] Noise sampling disabled, region cleared')
+  }, [])
+
+  // SHARED PREVIEW PIPELINE - both "Preview" button and "Noise Sampler Preview" use this
+  const requestPreview = useCallback(async (params: { startSec: number; durationSec: number; reason: 'main' | 'noise-sampler' }) => {
+    if (!filePath) return
+
+    const { startSec, durationSec, reason } = params
+    console.log('[requestPreview] ========== START ==========')
+    console.log('[requestPreview] reason:', reason)
+    console.log('[requestPreview] timing:', { startSec, durationSec })
+    console.log('[requestPreview] inputPath:', filePath)
+
+    // Force-enable NR for noise-sampler preview (local override, does not mutate global state)
+    const effectiveNoiseReduction = reason === 'noise-sampler'
+      ? { ...noiseReduction, enabled: true }
+      : noiseReduction
+
+    console.log('[requestPreview] noiseReduction:', { global: noiseReduction.enabled, effective: effectiveNoiseReduction.enabled })
+
+    setStatus('rendering')
+    setErrorMsg('')
+
+    try {
+      const result = await window.electronAPI.renderPreview({
+        inputPath: filePath,
+        startTime: startSec,
+        duration: durationSec,
+        bands,
+        hpf,
+        lpf,
+        compressor,
+        noiseReduction: effectiveNoiseReduction,
+        autoMix
+      })
+
+      if (result.success) {
+        const origUrl = await window.electronAPI.getFileUrl(result.originalPath!)
+        const procUrl = await window.electronAPI.getFileUrl(result.processedPath!)
+        // Cache-bust with renderId to prevent stale video playback
+        const cacheBuster = `?v=${result.renderId}`
+        const finalProcUrl = procUrl + cacheBuster
+        setOriginalUrl(origUrl + cacheBuster)
+        setProcessedUrl(finalProcUrl)
+        setProcessedDirty(false)  // Render complete - processed audio is current
+        setStatus('done')
+
+        console.log('[requestPreview] ========== COMPLETE ==========')
+        console.log('[requestPreview] reason:', reason)
+        console.log('[requestPreview] playing URL directly:', finalProcUrl)
+
+        // Play the URL directly (bypasses stale props from React async state)
+        videoPreviewRef.current?.playUrl(finalProcUrl)
+      } else {
+        // Keep processedDirty = true on failure
+        setStatus('error')
+        setErrorMsg(result.error || 'Unknown error')
+        console.log('[requestPreview] ========== FAILED ==========')
+        console.log('[requestPreview] error:', result.error)
+      }
+    } catch (err) {
+      // Keep processedDirty = true on failure
+      setStatus('error')
+      setErrorMsg(String(err))
+      console.log('[requestPreview] ========== ERROR ==========')
+      console.log('[requestPreview] exception:', err)
+    }
+  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix])
+
+  // "Preview" button handler - delegates to shared pipeline
+  // Uses fixed PREVIEW_DURATION_SEC per investigation doc
+  const handleRender = useCallback(async () => {
+    await requestPreview({ startSec: startTime, durationSec: PREVIEW_DURATION_SEC, reason: 'main' })
+  }, [requestPreview, startTime])
+
+  // Handle noise sample candidate preview - USES SHARED PREVIEW PIPELINE
+  const handlePreviewCandidate = useCallback(async (candidate: QuietCandidate) => {
+    const startSec = candidate.startMs / 1000
+    const durationSec = (candidate.endMs - candidate.startMs) / 1000
+
+    console.log('[handlePreviewCandidate] candidate:', { startMs: candidate.startMs, endMs: candidate.endMs })
+    console.log('[handlePreviewCandidate] delegating to requestPreview with:', { startSec, durationSec })
+
+    await requestPreview({ startSec, durationSec, reason: 'noise-sampler' })
+  }, [requestPreview])
 
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
@@ -145,6 +252,7 @@ function App() {
       setOriginalUrl(null)
       setProcessedUrl(null)
       setProcessedDirty(true)  // New file = no processed audio
+      setNoiseSampleRegion(null)  // Clear noise sample for new file
       // Clear transcript error when new file is selected
       setTranscriptError(null)
     }
@@ -236,48 +344,6 @@ function App() {
     })
   }
 
-  const handleRender = useCallback(async () => {
-    if (!filePath) return
-
-    console.log('[handleRender] inputPath:', filePath)
-
-    setStatus('rendering')
-    setErrorMsg('')
-
-    try {
-      const result = await window.electronAPI.renderPreview({
-        inputPath: filePath,
-        startTime,
-        duration,
-        bands,
-        hpf,
-        lpf,
-        compressor,
-        noiseReduction,
-        autoMix
-      })
-
-      if (result.success) {
-        const origUrl = await window.electronAPI.getFileUrl(result.originalPath!)
-        const procUrl = await window.electronAPI.getFileUrl(result.processedPath!)
-        // Cache-bust with renderId to prevent stale video playback
-        const cacheBuster = `?v=${result.renderId}`
-        setOriginalUrl(origUrl + cacheBuster)
-        setProcessedUrl(procUrl + cacheBuster)
-        setProcessedDirty(false)  // Render complete - processed audio is current
-        setStatus('done')
-      } else {
-        // Keep processedDirty = true on failure
-        setStatus('error')
-        setErrorMsg(result.error || 'Unknown error')
-      }
-    } catch (err) {
-      // Keep processedDirty = true on failure
-      setStatus('error')
-      setErrorMsg(String(err))
-    }
-  }, [filePath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix])
-
   const playOriginal = () => videoPreviewRef.current?.playOriginal()
   const playProcessed = () => {
     // Playback gate: only play if processed audio is current
@@ -311,10 +377,8 @@ function App() {
           <SourceControls
             filePath={filePath}
             startTime={startTime}
-            duration={duration}
             onSelectFile={handleSelectFile}
             onStartTimeChange={markDirtyAndSetStartTime}
-            onDurationChange={markDirtyAndSetDuration}
           />
       {/* Channel Strips Container */}
       <AudioControls
@@ -332,21 +396,32 @@ function App() {
         onAutoMixChange={markDirtyAndSetAutoMix}
         onAutoMixPresetChange={handleAutoMixPresetChange}
       />
+
+      {/* Noise Sampling */}
+      <div className="section" style={{ padding: '8px 16px' }}>
+        <NoiseSampling
+          filePath={filePath}
+          onNoiseSampleAccepted={handleNoiseSampleAccepted}
+          onPreviewCandidate={handlePreviewCandidate}
+          onNoiseSamplingDisabled={handleNoiseSamplingDisabled}
+        />
+      </div>
+
       {/* Render & Playback */}
       <div className="section">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button onClick={handleRender} disabled={!filePath || status === 'rendering'}>
-            Render Preview
-          </button>
           <button onClick={playOriginal} disabled={!originalUrl}>
-            Play Original
+            Play
+          </button>
+          <button onClick={handleRender} disabled={!filePath || status === 'rendering'}>
+            Preview
           </button>
           <button
             onClick={playProcessed}
             disabled={!filePath || status === 'rendering'}
             style={processedDirty && filePath ? { opacity: 0.7 } : undefined}
           >
-            {processedDirty && filePath ? 'Render & Play' : 'Play Processed'}
+            {processedDirty && filePath ? 'Render' : 'Play Processed'}
           </button>
           {!currentJob && statusText && (
             <div className={`status ${status}`} style={{ marginLeft: 12 }}>

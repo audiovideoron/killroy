@@ -101,3 +101,37 @@ export const LOUDNESS_CONFIG = {
   SILENCE_THRESHOLD: -70,  // Skip if quieter than this (LUFS)
   NEGLIGIBLE_GAIN: 0.5,    // Skip if gain is smaller than this (dB)
 } as const
+
+/**
+ * Quiet region candidate for noise sampling.
+ * Detected via FFmpeg silencedetect.
+ */
+export interface QuietCandidate {
+  startMs: number
+  endMs: number
+}
+
+/**
+ * Result of quiet candidate detection.
+ */
+export interface QuietCandidatesResult {
+  candidates: QuietCandidate[]
+}
+
+/**
+ * Configuration for quiet region detection.
+ * Threshold is dynamic: mean_volume - THRESHOLD_OFFSET_DB, clamped to [MIN, MAX].
+ */
+export const QUIET_DETECTION_CONFIG = {
+  // Proof mode: maximally permissive settings to prove pipeline works
+  PROOF_MODE: true,            // SET TO false FOR PRODUCTION
+  PROOF_THRESHOLD_DB: -15,     // Permissive threshold for proof mode
+  PROOF_MIN_DURATION_SEC: 0.05,// Very short duration for proof mode
+
+  // Normal mode settings
+  THRESHOLD_OFFSET_DB: 6,      // dB below mean volume to consider "quiet"
+  THRESHOLD_MIN_DB: -45,       // Floor: never go below this
+  THRESHOLD_MAX_DB: -15,       // Ceiling: never go above this
+  MIN_DURATION_SEC: 0.5,       // Minimum quiet region duration in seconds
+  MAX_CANDIDATES: 5,           // Maximum candidates to return
+} as const

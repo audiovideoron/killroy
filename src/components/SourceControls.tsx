@@ -1,19 +1,22 @@
+/**
+ * Source file selection and preview start time controls.
+ *
+ * Note: Preview duration is fixed at 10 seconds (PREVIEW_DURATION_SEC).
+ * See: docs/noise-sample-auto-selection-investigation.md
+ */
+
 interface SourceControlsProps {
   filePath: string | null
   startTime: number
-  duration: number
   onSelectFile: () => void
   onStartTimeChange: (value: number) => void
-  onDurationChange: (value: number) => void
 }
 
 export function SourceControls({
   filePath,
   startTime,
-  duration,
   onSelectFile,
-  onStartTimeChange,
-  onDurationChange
+  onStartTimeChange
 }: SourceControlsProps) {
   // Extract filename from path (handles both Unix and Windows)
   const fileName = filePath?.split(/[/\\]/).pop()
@@ -26,23 +29,12 @@ export function SourceControls({
       </div>
       <div style={{ display: 'flex', gap: 16 }}>
         <div className="field">
-          <span>Start (sec)</span>
+          <span>Preview Start (sec)</span>
           <input
             type="number"
             min={0}
             value={startTime}
             onChange={e => onStartTimeChange(Number(e.target.value))}
-            style={{ width: 60 }}
-          />
-        </div>
-        <div className="field">
-          <span>Duration (sec)</span>
-          <input
-            type="number"
-            min={1}
-            max={60}
-            value={duration}
-            onChange={e => onDurationChange(Number(e.target.value))}
             style={{ width: 60 }}
           />
         </div>
