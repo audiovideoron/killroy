@@ -3,6 +3,7 @@ dist/
 dist-electron/
 tmp/
 logs/
+issues/
 
 # Media files (test videos go in media/)
 media/
