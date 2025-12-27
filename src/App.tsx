@@ -4,7 +4,6 @@ import { TranscriptPane } from './components/TranscriptPane'
 import { JobProgressBanner } from './components/JobProgressBanner'
 import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview'
 import { SourceControls } from './components/SourceControls'
-import { NoiseSampling } from './components/NoiseSampling'
 import { useJobProgress } from './hooks/useJobProgress'
 import type { EQBand, FilterParams, CompressorParams, NoiseSamplingParams, AutoGainParams, LoudnessParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
 import { AUTOGAIN_CONFIG, LOUDNESS_CONFIG } from '../shared/types'
@@ -93,21 +92,6 @@ function App() {
   const markDirtyAndSetCompressor = useCallback((v: CompressorParams | ((prev: CompressorParams) => CompressorParams)) => { setProcessedDirty(true); setCompressor(v) }, [])
   const markDirtyAndSetNoiseSampling = useCallback((v: NoiseSamplingParams) => { setProcessedDirty(true); setNoiseSampling(v) }, [])
   const markDirtyAndSetAutoMix = useCallback((v: AutoMixParams) => { setProcessedDirty(true); setAutoMix(v) }, [])
-
-  // Handle noise sample region acceptance
-  const handleNoiseSampleAccepted = useCallback((candidate: QuietCandidate) => {
-    setNoiseSampleRegion(candidate)
-    setProcessedDirty(true)  // Noise sample change invalidates processed audio
-    console.log('[App] Noise sample region accepted:', candidate)
-    // Note: The actual noise profile computation will be added in the noise sampling backend stage
-  }, [])
-
-  // Handle noise sampling disabled - clears the noise sample region
-  const handleNoiseSamplingDisabled = useCallback(() => {
-    setNoiseSampleRegion(null)
-    setProcessedDirty(true)  // Noise sample removal invalidates processed audio
-    console.log('[App] Noise sampling disabled, region cleared')
-  }, [])
 
   // Global Preview pipeline - single path for all auditioning
   const requestPreview = useCallback(async (params: { startSec: number; durationSec: number }) => {
@@ -442,15 +426,6 @@ function App() {
         onAutoMixChange={markDirtyAndSetAutoMix}
         onAutoMixPresetChange={handleAutoMixPresetChange}
       />
-
-      {/* Noise Sampling */}
-      <div className="section" style={{ padding: '8px 16px' }}>
-        <NoiseSampling
-          filePath={filePath}
-          onNoiseSampleAccepted={handleNoiseSampleAccepted}
-          onNoiseSamplingDisabled={handleNoiseSamplingDisabled}
-        />
-      </div>
 
       {/* Transport: Play / Preview / Render */}
       <div className="section">
