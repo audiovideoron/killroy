@@ -159,7 +159,7 @@ ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
 })
 
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
-  const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix } = options
+  const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion } = options
 
   try {
     // VALIDATION: Verify input path before any FFmpeg/ffprobe execution
@@ -255,7 +255,7 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
     // Build base filter chain (NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix)
-    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
+    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion)
 
     // === PASS 1: Loudness Analysis ===
     // Analyze loudness of the processed audio to determine gain adjustment
@@ -384,7 +384,7 @@ ipcMain.handle('cancel-render', (_event, jobId: string) => {
  * Non-accumulative: always starts from original source
  */
 ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
-  const { inputPath, bands, hpf, lpf, compressor, noiseReduction, autoMix } = options
+  const { inputPath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion } = options
 
   try {
     // Validate input path
@@ -425,7 +425,7 @@ ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
     const durationSec = parseFloat(metadata.format.duration || '0')
 
     // Build filter chain (same as preview)
-    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
+    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion)
 
     // Loudness analysis on entire file (no time range)
     let loudnessGain: number | null = null

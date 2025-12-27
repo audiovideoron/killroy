@@ -49,6 +49,7 @@ export interface RenderOptions {
   compressor: CompressorParams
   noiseReduction: NoiseReductionParams
   autoMix: AutoMixParams
+  noiseSampleRegion: QuietCandidate | null
 }
 
 export interface RenderResult {

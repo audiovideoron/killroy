@@ -111,7 +111,8 @@ function App() {
         lpf,
         compressor,
         noiseReduction,
-        autoMix
+        autoMix,
+        noiseSampleRegion
       })
 
       if (result.success) {
@@ -144,7 +145,7 @@ function App() {
       console.log('[requestPreview] ========== ERROR ==========')
       console.log('[requestPreview] exception:', err)
     }
-  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix])
+  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion])
 
   // "Preview" button handler - delegates to global preview pipeline
   // Uses fixed PREVIEW_DURATION_SEC per investigation doc
@@ -168,7 +169,8 @@ function App() {
         lpf,
         compressor,
         noiseReduction,
-        autoMix
+        autoMix,
+        noiseSampleRegion
       })
 
       if (result.success) {
@@ -185,7 +187,7 @@ function App() {
       setStatus('error')
       setErrorMsg(String(err))
     }
-  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix])
+  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion])
 
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {

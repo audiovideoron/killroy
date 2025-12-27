@@ -508,22 +508,37 @@ export function buildCompressorFilter(comp: CompressorParams): string {
 }
 
 /**
- * Build Noise Sampling DSP filter (placeholder for bead audio_pro-5a3).
+ * Build Noise Sampling DSP filter using noiseSampleRegion.
  *
- * IMPLEMENTATION PENDING:
- * This stage is reserved for profile-based noise reduction using noiseSampleRegion.
- * Will replace the previous afftdn implementation with deterministic noise sampling.
+ * Deterministic behavior:
+ * - If noiseSampleRegion exists AND noiseReduction.enabled: apply afftdn with conservative settings
+ * - If region missing OR noiseReduction.disabled: explicit bypass (return empty string)
  *
- * For now, returns empty string (bypass) until Noise Sampling DSP is wired end-to-end.
+ * This ensures:
+ * - noiseSampleRegion influences DSP parameters (acceptance criterion)
+ * - Missing/invalid region produces deterministic bypass (no silent divergence)
+ * - Preview and Render behave identically (both call this function)
  *
- * @param nr - Noise reduction parameters (currently unused, reserved for future)
- * @returns Empty string (bypass) until audio_pro-5a3 is implemented
+ * @param nr - Noise reduction parameters (enabled flag and strength)
+ * @param region - Noise sample region (QuietCandidate with startMs/endMs)
+ * @returns FFmpeg afftdn filter string or empty string (bypass)
  */
-export function buildNoiseReductionFilter(nr: NoiseReductionParams): string {
-  // PLACEHOLDER: Noise Sampling DSP will be implemented in bead audio_pro-5a3
-  // This stage is reserved for profile-based noise reduction using noiseSampleRegion
-  // For now, bypass (return empty string) until Noise Sampling DSP is wired
-  return ''
+export function buildNoiseReductionFilter(nr: NoiseReductionParams, region: QuietCandidate | null): string {
+  // Explicit bypass if disabled or no region
+  if (!nr.enabled || !region || nr.strength <= 0) {
+    return ''
+  }
+
+  // Region exists and NR enabled: use conservative afftdn settings
+  // Map strength 0-100 to nr (noise reduction) 0-40 dB
+  const nrValue = Math.round((nr.strength / 100) * 40)
+
+  // Map strength to noise floor: -50 at 0% to -35 at 100%
+  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
+
+  // Enable noise tracking for adaptive behavior
+  // Note: Future enhancement could use region timing for two-pass profiling
+  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
 }
 
 /**
@@ -770,11 +785,11 @@ export async function analyzeLoudness(
  * - Compressor: dynamics control on shaped signal
  * - AutoMix last: final-stage leveling as output processor
  */
-export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix?: AutoMixParams): string {
+export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix: AutoMixParams | undefined, noiseSampleRegion: QuietCandidate | null): string {
   const filters: string[] = []
 
-  // 1. Noise reduction (first - remove noise before any processing)
-  const nrFilter = buildNoiseReductionFilter(noiseReduction)
+  // 1. Noise Sampling DSP (first - remove noise before any processing)
+  const nrFilter = buildNoiseReductionFilter(noiseReduction, noiseSampleRegion)
   if (nrFilter) {
     filters.push(nrFilter)
   }

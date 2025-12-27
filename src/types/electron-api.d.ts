@@ -14,6 +14,7 @@ declare global {
         compressor: any
         noiseReduction: any
         autoMix: any
+        noiseSampleRegion: any
       }) => Promise<any>
       renderFullAudio: (options: {
         inputPath: string
@@ -23,6 +24,7 @@ declare global {
         compressor: any
         noiseReduction: any
         autoMix: any
+        noiseSampleRegion: any
       }) => Promise<any>
       getFileUrl: (filePath: string) => Promise<string>
       onJobProgress: (callback: (event: any) => void) => () => void
