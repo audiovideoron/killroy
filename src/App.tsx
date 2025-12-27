@@ -362,13 +362,16 @@ function App() {
     })
   }
 
-  // Play button: plays original source (raw audio, no processing)
-  const playOriginal = () => videoPreviewRef.current?.playOriginal()
-
-  // Play Processed button: plays full processed artifact if available
-  const playProcessed = () => {
+  // Play button: intelligently selects best available artifact
+  // Priority: full processed > preview processed > original
+  // Never triggers FFmpeg - playback only
+  const playOriginal = () => {
     if (fullProcessedUrl) {
       videoPreviewRef.current?.playUrl(fullProcessedUrl)
+    } else if (processedUrl) {
+      videoPreviewRef.current?.playUrl(processedUrl)
+    } else {
+      videoPreviewRef.current?.playOriginal()
     }
   }
 
@@ -434,9 +437,6 @@ function App() {
           </button>
           <button onClick={handleRenderFull} disabled={!filePath || status === 'rendering'}>
             Render
-          </button>
-          <button onClick={playProcessed} disabled={!fullProcessedUrl}>
-            Play Processed
           </button>
           {!currentJob && statusText && (
             <div className={`status ${status}`} style={{ marginLeft: 12 }}>
