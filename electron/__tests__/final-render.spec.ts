@@ -91,7 +91,7 @@ describe('STEP 7 Gate: Final Render', () => {
     expect(reportData).toEqual(report)
 
     console.log('Final render report:', report)
-  }, 60000)
+  }, 180000) // 3min timeout - FFmpeg renders take ~143s
 
   it('renders full video with edits', async () => {
     if (!testVideoPath) {
@@ -156,7 +156,7 @@ describe('STEP 7 Gate: Final Render', () => {
       segments: report.segments_count,
       render_time_ms: report.render_time_ms
     })
-  }, 60000)
+  }, 180000) // 3min timeout - FFmpeg renders take ~143s
 
   it('throws when all content is removed', async () => {
     if (!testVideoPath) {
@@ -234,5 +234,5 @@ describe('STEP 7 Gate: Final Render', () => {
     expect(reportData.edl_version_id).toBe('edl-4')
     expect(reportData.output_path).toBe(outputPath)
     expect(reportData.created_at).toBeDefined()
-  }, 60000)
+  }, 180000) // 3min timeout - FFmpeg renders take ~143s
 })
