@@ -72,6 +72,14 @@ See `.claude/commands/architecture.md` for enforcement rules:
 4. **IPC typing** - All channels typed in preload.ts
 5. **Feature organization** - Group by domain in `src/features/`
 
+## Implementation Standards
+
+- **No placeholders**: Functions must return valid, functional output. Empty strings, TODO comments, or stub implementations are failures.
+- **No partial implementations**: If a feature has multiple stages, implement all stages fully or ask for clarification.
+- **If unsure, ask**: Do not stub or placeholder. Ask the user how to proceed.
+
+When receiving structured implementation prompts, apply the `optimize-prompt` skill before proceeding.
+
 ## Audio Signal Chain
 
 ```
