@@ -32,6 +32,33 @@ export interface NoiseReductionParams {
   enabled: boolean
 }
 
+/**
+ * AutoGain/Leveling - Input level normalization.
+ * Applies gentle automatic gain before other processing.
+ */
+export interface AutoGainParams {
+  targetLevel: number  // Target peak level in dB (-20 to 0)
+  enabled: boolean
+}
+
+/**
+ * AutoGain configuration defaults.
+ */
+export const AUTOGAIN_CONFIG = {
+  DEFAULT_TARGET: -6,    // Target peak level (dB)
+  MIN_TARGET: -20,
+  MAX_TARGET: 0,
+} as const
+
+/**
+ * Loudness normalization - EBU R128 loudness targeting.
+ * Applied after input normalization, before frequency shaping.
+ */
+export interface LoudnessParams {
+  targetLufs: number   // Target integrated loudness (-24 to -5 LUFS)
+  enabled: boolean
+}
+
 export type AutoMixPreset = 'LIGHT' | 'MEDIUM' | 'HEAVY'
 
 export interface AutoMixParams {
@@ -43,11 +70,13 @@ export interface RenderOptions {
   inputPath: string
   startTime: number
   duration: number
-  bands: EQBand[]
+  autoGain: AutoGainParams
+  loudness: LoudnessParams
+  noiseReduction: NoiseReductionParams
   hpf: FilterParams
   lpf: FilterParams
+  bands: EQBand[]
   compressor: CompressorParams
-  noiseReduction: NoiseReductionParams
   autoMix: AutoMixParams
   noiseSampleRegion: QuietCandidate | null
 }

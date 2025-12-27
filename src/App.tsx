@@ -6,7 +6,8 @@ import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview
 import { SourceControls } from './components/SourceControls'
 import { NoiseSampling } from './components/NoiseSampling'
 import { useJobProgress } from './hooks/useJobProgress'
-import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
+import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoGainParams, LoudnessParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
+import { AUTOGAIN_CONFIG, LOUDNESS_CONFIG } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
@@ -37,9 +38,28 @@ function App() {
     { frequency: 5000, gain: 0, q: 1.0, enabled: true }
   ])
 
+  // === Filter state (canonical order) ===
+  // 1. AutoGain/Leveling
+  const [autoGain, setAutoGain] = useState<AutoGainParams>({
+    targetLevel: AUTOGAIN_CONFIG.DEFAULT_TARGET,
+    enabled: false
+  })
+
+  // 2. Loudness normalization
+  const [loudness, setLoudness] = useState<LoudnessParams>({
+    targetLufs: LOUDNESS_CONFIG.TARGET_LUFS,
+    enabled: false
+  })
+
+  // 3. Noise Sampling DSP - see noiseReduction below
+
+  // 4. High-pass filter
   const [hpf, setHpf] = useState<FilterParams>({ frequency: 80, q: 0.7, enabled: false })
+
+  // 5. Low-pass filter
   const [lpf, setLpf] = useState<FilterParams>({ frequency: 12000, q: 0.7, enabled: false })
 
+  // 7. Compressor
   const [compressor, setCompressor] = useState<CompressorParams>({
     threshold: -20,
     ratio: 4,
@@ -68,6 +88,8 @@ function App() {
   // Any change to render configuration marks processed audio as stale
   const markDirtyAndSetStartTime = useCallback((v: number) => { setProcessedDirty(true); setStartTime(v) }, [])
   const markDirtyAndSetBands = useCallback((updater: (prev: EQBand[]) => EQBand[]) => { setProcessedDirty(true); setBands(updater) }, [])
+  const markDirtyAndSetAutoGain = useCallback((v: AutoGainParams) => { setProcessedDirty(true); setAutoGain(v) }, [])
+  const markDirtyAndSetLoudness = useCallback((v: LoudnessParams) => { setProcessedDirty(true); setLoudness(v) }, [])
   const markDirtyAndSetHpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setHpf(v) }, [])
   const markDirtyAndSetLpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setLpf(v) }, [])
   const markDirtyAndSetCompressor = useCallback((v: CompressorParams | ((prev: CompressorParams) => CompressorParams)) => { setProcessedDirty(true); setCompressor(v) }, [])
@@ -106,11 +128,13 @@ function App() {
         inputPath: filePath,
         startTime: startSec,
         duration: durationSec,
-        bands,
+        autoGain,
+        loudness,
+        noiseReduction,
         hpf,
         lpf,
+        bands,
         compressor,
-        noiseReduction,
         autoMix,
         noiseSampleRegion
       })
@@ -145,7 +169,7 @@ function App() {
       console.log('[requestPreview] ========== ERROR ==========')
       console.log('[requestPreview] exception:', err)
     }
-  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion])
+  }, [filePath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
 
   // "Preview" button handler - delegates to global preview pipeline
   // Uses fixed PREVIEW_DURATION_SEC per investigation doc
@@ -164,11 +188,15 @@ function App() {
     try {
       const result = await window.electronAPI.renderFullAudio({
         inputPath: filePath,
-        bands,
+        startTime: 0,
+        duration: 0, // Full file - duration determined by main process
+        autoGain,
+        loudness,
+        noiseReduction,
         hpf,
         lpf,
+        bands,
         compressor,
-        noiseReduction,
         autoMix,
         noiseSampleRegion
       })
@@ -187,7 +215,7 @@ function App() {
       setStatus('error')
       setErrorMsg(String(err))
     }
-  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion])
+  }, [filePath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
 
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {

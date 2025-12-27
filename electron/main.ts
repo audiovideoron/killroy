@@ -159,7 +159,7 @@ ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
 })
 
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
-  const { inputPath, startTime, duration, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion } = options
+  const { inputPath, startTime, duration, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
 
   try {
     // VALIDATION: Verify input path before any FFmpeg/ffprobe execution
@@ -254,28 +254,19 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
-    // Build base filter chain (NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix)
-    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion)
-
-    // === PASS 1: Loudness Analysis ===
-    // Analyze loudness of the processed audio to determine gain adjustment
-    let loudnessGain: number | null = null
-    try {
-      const analysis = await analyzeLoudness(inputPath, baseFilterChain, startTime, duration)
-      if (analysis) {
-        loudnessGain = calculateLoudnessGain(analysis)
-        console.log('[render-preview] Loudness analysis:', analysis)
-        console.log('[render-preview] Calculated gain:', loudnessGain, 'dB')
-      }
-    } catch (err) {
-      console.warn('[render-preview] Loudness analysis failed, skipping normalization:', err)
-    }
-
-    // === Build final filter chain (base + loudness gain) ===
-    const loudnessFilter = buildLoudnessGainFilter(loudnessGain)
-    const filterChain = loudnessFilter
-      ? (baseFilterChain ? `${baseFilterChain},${loudnessFilter}` : loudnessFilter)
-      : baseFilterChain
+    // Build full filter chain with all 8 stages:
+    // AutoGain → Loudness → NR → HPF → LPF → EQ → Compressor → AutoMix
+    const filterChain = buildFullFilterChain(
+      autoGain,
+      loudness,
+      noiseReduction,
+      hpf,
+      lpf,
+      bands,
+      compressor,
+      autoMix,
+      noiseSampleRegion
+    )
 
     // Build attempts with automatic copy → re-encode fallback
     const processedAttempts: RenderAttempt[] = [
@@ -384,7 +375,7 @@ ipcMain.handle('cancel-render', (_event, jobId: string) => {
  * Non-accumulative: always starts from original source
  */
 ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
-  const { inputPath, bands, hpf, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion } = options
+  const { inputPath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
 
   try {
     // Validate input path
@@ -424,24 +415,19 @@ ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
     // Get duration for progress reporting
     const durationSec = parseFloat(metadata.format.duration || '0')
 
-    // Build filter chain (same as preview)
-    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix, noiseSampleRegion)
-
-    // Loudness analysis on entire file (no time range)
-    let loudnessGain: number | null = null
-    try {
-      const analysis = await analyzeLoudness(inputPath, baseFilterChain, 0, durationSec)
-      if (analysis) {
-        loudnessGain = calculateLoudnessGain(analysis)
-      }
-    } catch (err) {
-      console.warn('[render-full-audio] Loudness analysis failed, skipping normalization:', err)
-    }
-
-    const loudnessFilter = buildLoudnessGainFilter(loudnessGain)
-    const filterChain = loudnessFilter
-      ? (baseFilterChain ? `${baseFilterChain},${loudnessFilter}` : loudnessFilter)
-      : baseFilterChain
+    // Build full filter chain with all 8 stages (same as preview):
+    // AutoGain → Loudness → NR → HPF → LPF → EQ → Compressor → AutoMix
+    const filterChain = buildFullFilterChain(
+      autoGain,
+      loudness,
+      noiseReduction,
+      hpf,
+      lpf,
+      bands,
+      compressor,
+      autoMix,
+      noiseSampleRegion
+    )
 
     // Render entire file
     const attempts: RenderAttempt[] = [

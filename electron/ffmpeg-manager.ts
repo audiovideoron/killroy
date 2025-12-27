@@ -7,13 +7,15 @@ import type {
   FilterParams,
   CompressorParams,
   NoiseReductionParams,
+  AutoGainParams,
+  LoudnessParams,
   AutoMixParams,
   JobProgressEvent,
   JobStatus,
   LoudnessAnalysis,
   QuietCandidate
 } from '../shared/types'
-import { LOUDNESS_CONFIG, QUIET_DETECTION_CONFIG } from '../shared/types'
+import { LOUDNESS_CONFIG, AUTOGAIN_CONFIG, QUIET_DETECTION_CONFIG } from '../shared/types'
 
 /**
  * FFmpeg job tracking for lifecycle management.
@@ -508,6 +510,52 @@ export function buildCompressorFilter(comp: CompressorParams): string {
 }
 
 /**
+ * Build AutoGain/Leveling filter for input level normalization.
+ *
+ * Uses FFmpeg's dynaudnorm with conservative settings for gentle
+ * automatic gain control at the input stage.
+ *
+ * @param autoGain - AutoGain parameters (targetLevel, enabled)
+ * @returns FFmpeg dynaudnorm filter string or empty string (bypass)
+ */
+export function buildAutoGainFilter(autoGain: AutoGainParams): string {
+  if (!autoGain.enabled) return ''
+
+  // Use dynaudnorm with conservative settings for input leveling
+  // - f=500: 500ms frame length (moderate response time)
+  // - g=31: Gaussian window size (smooth transitions)
+  // - p: Target peak level (derived from targetLevel dB)
+  // - m=2: Maximum gain of 2x (conservative to avoid pumping)
+  // - s=0: No compression of peaks
+  const peak = Math.pow(10, autoGain.targetLevel / 20) // Convert dB to linear
+  const peakClamped = Math.min(1.0, Math.max(0.1, peak))
+
+  return `dynaudnorm=f=500:g=31:p=${peakClamped.toFixed(3)}:m=2:s=0`
+}
+
+/**
+ * Build Loudness normalization filter using EBU R128 standard.
+ *
+ * Uses FFmpeg's loudnorm in single-pass mode for real-time chain use.
+ * Targets integrated loudness with true peak limiting.
+ *
+ * @param loudness - Loudness parameters (targetLufs, enabled)
+ * @returns FFmpeg loudnorm filter string or empty string (bypass)
+ */
+export function buildLoudnessFilter(loudness: LoudnessParams): string {
+  if (!loudness.enabled) return ''
+
+  // EBU R128 loudness normalization
+  // - I: Target integrated loudness (LUFS)
+  // - LRA: Loudness range target (LU) - 7 is typical for speech
+  // - TP: True peak ceiling (dBTP)
+  // - print_format: silent (no analysis output in single-pass mode)
+  const targetLufs = Math.max(-24, Math.min(-5, loudness.targetLufs))
+
+  return `loudnorm=I=${targetLufs}:LRA=7:TP=${LOUDNESS_CONFIG.TRUE_PEAK_CEILING}:print_format=none`
+}
+
+/**
  * Build Noise Sampling DSP filter using noiseSampleRegion.
  *
  * Deterministic behavior:
@@ -775,53 +823,76 @@ export async function analyzeLoudness(
 /**
  * Build full audio filter chain.
  *
- * Signal chain order (when enabled):
- *   NR → HPF → LPF → EQ → Compressor → AutoMix
+ * CANONICAL SIGNAL CHAIN ORDER (LOCKED - DO NOT REORDER):
+ *   1. AutoGain/Leveling → 2. Loudness → 3. Noise Sampling DSP →
+ *   4. Highpass → 5. Lowpass → 6. EQ → 7. Compressor → 8. AutoMix
  *
  * Rationale:
- * - NR first: removes noise before any frequency shaping
+ * - AutoGain first: normalize input levels before any processing
+ * - Loudness second: EBU R128 normalization on level-corrected signal
+ * - Noise Sampling DSP third: remove noise before frequency shaping
  * - HPF/LPF next: bandwidth limiting before tonal adjustment
  * - EQ: tonal shaping on clean, bandwidth-limited signal
  * - Compressor: dynamics control on shaped signal
  * - AutoMix last: final-stage leveling as output processor
  */
-export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix: AutoMixParams | undefined, noiseSampleRegion: QuietCandidate | null): string {
+export function buildFullFilterChain(
+  autoGain: AutoGainParams,
+  loudness: LoudnessParams,
+  noiseReduction: NoiseReductionParams,
+  hpf: FilterParams,
+  lpf: FilterParams,
+  bands: EQBand[],
+  compressor: CompressorParams,
+  autoMix: AutoMixParams,
+  noiseSampleRegion: QuietCandidate | null
+): string {
   const filters: string[] = []
 
-  // 1. Noise Sampling DSP (first - remove noise before any processing)
+  // 1. AutoGain/Leveling (input level normalization)
+  const autoGainFilter = buildAutoGainFilter(autoGain)
+  if (autoGainFilter) {
+    filters.push(autoGainFilter)
+  }
+
+  // 2. Loudness (EBU R128 normalization)
+  const loudnessFilter = buildLoudnessFilter(loudness)
+  if (loudnessFilter) {
+    filters.push(loudnessFilter)
+  }
+
+  // 3. Noise Sampling DSP (noise reduction before frequency shaping)
   const nrFilter = buildNoiseReductionFilter(noiseReduction, noiseSampleRegion)
   if (nrFilter) {
     filters.push(nrFilter)
   }
 
-  // 2. High-pass filter (bandwidth limiting)
+  // 4. High-pass filter (bandwidth limiting)
   if (hpf.enabled) {
     filters.push(`highpass=f=${hpf.frequency}`)
   }
 
-  // 3. Low-pass filter (bandwidth limiting)
+  // 5. Low-pass filter (bandwidth limiting)
   if (lpf.enabled) {
     filters.push(`lowpass=f=${lpf.frequency}`)
   }
 
-  // 4. Parametric EQ bands (tonal shaping)
+  // 6. Parametric EQ bands (tonal shaping)
   const eqFilter = buildEQFilter(bands)
   if (eqFilter) {
     filters.push(eqFilter)
   }
 
-  // 5. Compressor/Limiter (dynamics control)
+  // 7. Compressor/Limiter (dynamics control)
   const compFilter = buildCompressorFilter(compressor)
   if (compFilter) {
     filters.push(compFilter)
   }
 
-  // 6. AutoMix (final-stage leveling - always last)
-  if (autoMix) {
-    const autoMixFilter = buildAutoMixFilter(autoMix)
-    if (autoMixFilter) {
-      filters.push(autoMixFilter)
-    }
+  // 8. AutoMix (final-stage leveling - always last)
+  const autoMixFilter = buildAutoMixFilter(autoMix)
+  if (autoMixFilter) {
+    filters.push(autoMixFilter)
   }
 
   return filters.join(',')

@@ -8,21 +8,27 @@ declare global {
         inputPath: string
         startTime: number
         duration: number
-        bands: any[]
+        autoGain: any
+        loudness: any
+        noiseReduction: any
         hpf: any
         lpf: any
+        bands: any[]
         compressor: any
-        noiseReduction: any
         autoMix: any
         noiseSampleRegion: any
       }) => Promise<any>
       renderFullAudio: (options: {
         inputPath: string
-        bands: any[]
+        startTime: number
+        duration: number
+        autoGain: any
+        loudness: any
+        noiseReduction: any
         hpf: any
         lpf: any
+        bands: any[]
         compressor: any
-        noiseReduction: any
         autoMix: any
         noiseSampleRegion: any
       }) => Promise<any>
