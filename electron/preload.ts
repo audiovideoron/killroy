@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renderPreview: (options: RenderOptions): Promise<RenderResult> =>
     ipcRenderer.invoke('render-preview', options),
 
+  renderFullAudio: (options: RenderOptions): Promise<RenderResult> =>
+    ipcRenderer.invoke('render-full-audio', options),
+
   getFileUrl: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('get-file-url', filePath),
 

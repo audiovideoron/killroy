@@ -1,12 +1,4 @@
-import type {
-  EQBand,
-  FilterParams,
-  CompressorParams,
-  NoiseReductionParams,
-  RenderResult,
-  QuietCandidatesResult
-} from '../../shared/types'
-import type { TranscriptV1, EdlV1 } from '../../shared/editor-types'
+/// <reference types="../types/electron-api" />
 
 declare global {
   interface Window {
@@ -16,18 +8,29 @@ declare global {
         inputPath: string
         startTime: number
         duration: number
-        bands: EQBand[]
-        hpf: FilterParams
-        lpf: FilterParams
-        compressor: CompressorParams
-        noiseReduction: NoiseReductionParams
-      }) => Promise<RenderResult>
+        bands: any[]
+        hpf: any
+        lpf: any
+        compressor: any
+        noiseReduction: any
+        autoMix: any
+      }) => Promise<any>
+      renderFullAudio: (options: {
+        inputPath: string
+        bands: any[]
+        hpf: any
+        lpf: any
+        compressor: any
+        noiseReduction: any
+        autoMix: any
+      }) => Promise<any>
       getFileUrl: (filePath: string) => Promise<string>
-      getTranscript: (filePath: string) => Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }>
-      renderFinal: (filePath: string, edl: EdlV1, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
+      onJobProgress: (callback: (event: any) => void) => () => void
+      getTranscript: (filePath: string) => Promise<{ transcript: any; edl: any; asrBackend: string }>
+      renderFinal: (filePath: string, edl: any, outputPath: string) => Promise<{ success: boolean; outputPath?: string; error?: string }>
       saveDialog: (defaultPath: string) => Promise<string | null>
       cancelRender: (jobId: string) => Promise<{ cancelled: boolean; message: string }>
-      detectQuietCandidates: (filePath: string) => Promise<QuietCandidatesResult>
+      detectQuietCandidates: (filePath: string) => Promise<any>
     }
   }
 }

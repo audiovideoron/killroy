@@ -16,14 +16,6 @@ export interface JobProgressViewState {
   clearTimerId?: number    // Timer ID for clearing terminal state
 }
 
-declare global {
-  interface Window {
-    electronAPI: {
-      onJobProgress: (callback: (event: JobProgressEvent) => void) => () => void
-    }
-  }
-}
-
 /**
  * Hook to manage job progress state with timing enforcement.
  *

@@ -379,6 +379,129 @@ ipcMain.handle('cancel-render', (_event, jobId: string) => {
   return cancelFFmpegJob(jobId, mainWindow)
 })
 
+/**
+ * Render full audio - processes entire file with filter chain
+ * Non-accumulative: always starts from original source
+ */
+ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
+  const { inputPath, bands, hpf, lpf, compressor, noiseReduction, autoMix } = options
+
+  try {
+    // Validate input path
+    const validation = validateMediaPath(inputPath)
+    if (!validation.ok) {
+      return { success: false, error: `Invalid input file: ${validation.message}` }
+    }
+
+    approveFilePath(inputPath)
+
+    // Generate job ID and output path
+    const jobId = `ffmpeg-full-${Date.now()}-${Math.random().toString(36).substring(7)}`
+    const jobTempDir = createJobTempDir(jobId)
+    const baseName = path.basename(inputPath, path.extname(inputPath))
+    const renderId = Date.now()
+    const processedOutput = path.join(jobTempDir, `${baseName}-full-processed-${renderId}.mp4`)
+
+    approveFilePath(processedOutput)
+
+    if (fs.existsSync(processedOutput)) {
+      fs.unlinkSync(processedOutput)
+    }
+
+    // Probe metadata
+    let metadata
+    try {
+      metadata = await probeMediaMetadata(inputPath)
+    } catch (err: any) {
+      return { success: false, error: `Failed to probe media file: ${err.message}` }
+    }
+
+    const hasAudio = metadata.streams.some(stream => stream.codec_type === 'audio')
+    if (!hasAudio) {
+      return { success: false, error: 'Input file has no audio stream' }
+    }
+
+    // Get duration for progress reporting
+    const durationSec = parseFloat(metadata.format.duration || '0')
+
+    // Build filter chain (same as preview)
+    const baseFilterChain = buildFullFilterChain(hpf, bands, lpf, compressor, noiseReduction, autoMix)
+
+    // Loudness analysis on entire file (no time range)
+    let loudnessGain: number | null = null
+    try {
+      const analysis = await analyzeLoudness(inputPath, baseFilterChain, 0, durationSec)
+      if (analysis) {
+        loudnessGain = calculateLoudnessGain(analysis)
+      }
+    } catch (err) {
+      console.warn('[render-full-audio] Loudness analysis failed, skipping normalization:', err)
+    }
+
+    const loudnessFilter = buildLoudnessGainFilter(loudnessGain)
+    const filterChain = loudnessFilter
+      ? (baseFilterChain ? `${baseFilterChain},${loudnessFilter}` : loudnessFilter)
+      : baseFilterChain
+
+    // Render entire file
+    const attempts: RenderAttempt[] = [
+      {
+        name: 'COPY',
+        args: filterChain ? [
+          '-y',
+          '-i', inputPath,
+          '-c:v', 'copy',
+          '-af', filterChain,
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ] : [
+          '-y',
+          '-i', inputPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ]
+      },
+      {
+        name: 'REENCODE',
+        args: filterChain ? [
+          '-y',
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-af', filterChain,
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ] : [
+          '-y',
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ]
+      }
+    ]
+
+    await tryRenderStrategies(attempts, 'full-audio-render', durationSec, 'full-audio-render', jobId, mainWindow)
+
+    return {
+      success: true,
+      processedPath: processedOutput,
+      renderId
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || String(err)
+    }
+  }
+})
+
 // Transcript generation handler
 ipcMain.handle('get-transcript', async (_event, filePath: string): Promise<{ transcript: TranscriptV1; edl: EdlV1; asrBackend: string }> => {
   // 1. Extract video metadata to get video_id

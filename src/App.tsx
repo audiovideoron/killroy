@@ -8,7 +8,6 @@ import { NoiseSampling } from './components/NoiseSampling'
 import { useJobProgress } from './hooks/useJobProgress'
 import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
-import './types/electron-api.d'
 
 type Status = 'idle' | 'rendering' | 'done' | 'error'
 
@@ -153,6 +152,41 @@ function App() {
     await requestPreview({ startSec: startTime, durationSec: PREVIEW_DURATION_SEC })
   }, [requestPreview, startTime])
 
+  // "Render" button handler - processes entire file with full chain
+  // Non-accumulative: always starts from original source
+  const handleRenderFull = useCallback(async () => {
+    if (!filePath) return
+
+    setStatus('rendering')
+    setErrorMsg('')
+
+    try {
+      const result = await window.electronAPI.renderFullAudio({
+        inputPath: filePath,
+        bands,
+        hpf,
+        lpf,
+        compressor,
+        noiseReduction,
+        autoMix
+      })
+
+      if (result.success) {
+        const procUrl = await window.electronAPI.getFileUrl(result.processedPath!)
+        const cacheBuster = `?v=${result.renderId}`
+        setFullProcessedUrl(procUrl + cacheBuster)
+        setProcessedDirty(false)  // Full render complete - processed audio is current
+        setStatus('done')
+      } else {
+        setStatus('error')
+        setErrorMsg(result.error || 'Unknown error')
+      }
+    } catch (err) {
+      setStatus('error')
+      setErrorMsg(String(err))
+    }
+  }, [filePath, bands, hpf, lpf, compressor, noiseReduction, autoMix])
+
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
     // Mark dirty - configuration is changing
@@ -204,6 +238,7 @@ function App() {
 
   const [originalUrl, setOriginalUrl] = useState<string | null>(null)
   const [processedUrl, setProcessedUrl] = useState<string | null>(null)
+  const [fullProcessedUrl, setFullProcessedUrl] = useState<string | null>(null)
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null)
 
@@ -231,6 +266,7 @@ function App() {
       setErrorMsg('')
       setOriginalUrl(null)
       setProcessedUrl(null)
+      setFullProcessedUrl(null)  // Clear full processed artifact
       setProcessedDirty(true)  // New file = no processed audio
       setNoiseSampleRegion(null)  // Clear noise sample for new file
       // Clear transcript error when new file is selected
@@ -253,7 +289,7 @@ function App() {
       console.log('[Transcript Loaded]', {
         backend: result.asrBackend,
         tokens: result.transcript.tokens.length,
-        firstTokens: result.transcript.tokens.slice(0, 3).map(t => t.text)
+        firstTokens: result.transcript.tokens.slice(0, 3).map((t: any) => t.text)
       })
 
       setTranscriptCache(prev => new Map(prev).set(filePath, result))
@@ -324,15 +360,14 @@ function App() {
     })
   }
 
+  // Play button: plays original source (raw audio, no processing)
   const playOriginal = () => videoPreviewRef.current?.playOriginal()
+
+  // Play Processed button: plays full processed artifact if available
   const playProcessed = () => {
-    // Playback gate: only play if processed audio is current
-    if (processedDirty) {
-      // Force render if dirty - don't play stale audio
-      handleRender()
-      return
+    if (fullProcessedUrl) {
+      videoPreviewRef.current?.playUrl(fullProcessedUrl)
     }
-    videoPreviewRef.current?.playProcessed()
   }
 
   // Build status text for App-level status (non-job-progress states)
@@ -386,7 +421,7 @@ function App() {
         />
       </div>
 
-      {/* Render & Playback */}
+      {/* Transport: Play / Preview / Render */}
       <div className="section">
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <button onClick={playOriginal} disabled={!originalUrl}>
@@ -395,12 +430,11 @@ function App() {
           <button onClick={handleRender} disabled={!filePath || status === 'rendering'}>
             Preview
           </button>
-          <button
-            onClick={playProcessed}
-            disabled={!filePath || status === 'rendering'}
-            style={processedDirty && filePath ? { opacity: 0.7 } : undefined}
-          >
-            {processedDirty && filePath ? 'Render' : 'Play Processed'}
+          <button onClick={handleRenderFull} disabled={!filePath || status === 'rendering'}>
+            Render
+          </button>
+          <button onClick={playProcessed} disabled={!fullProcessedUrl}>
+            Play Processed
           </button>
           {!currentJob && statusText && (
             <div className={`status ${status}`} style={{ marginLeft: 12 }}>

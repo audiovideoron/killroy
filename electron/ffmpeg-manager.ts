@@ -508,34 +508,22 @@ export function buildCompressorFilter(comp: CompressorParams): string {
 }
 
 /**
- * Build afftdn noise reduction filter from user-facing Strength (0-100).
+ * Build Noise Sampling DSP filter (placeholder for bead audio_pro-5a3).
  *
- * afftdn parameters used:
- * - nr: noise reduction in dB (0.01-97, default 12). Higher = more reduction.
- * - nf: noise floor in dB (-80 to -20, default -50). Higher = less aggressive detection.
- * - tn: track noise (boolean). Adapts to changing noise characteristics.
+ * IMPLEMENTATION PENDING:
+ * This stage is reserved for profile-based noise reduction using noiseSampleRegion.
+ * Will replace the previous afftdn implementation with deterministic noise sampling.
  *
- * Mapping strategy (conservative to avoid metallic artifacts):
- * - Strength 0: bypass (not in chain)
- * - Strength 25: light (nr=10, nf=-50) - subtle cleanup
- * - Strength 50: moderate (nr=20, nf=-45) - noticeable reduction
- * - Strength 75: strong (nr=30, nf=-40) - significant reduction
- * - Strength 100: maximum safe (nr=40, nf=-35) - aggressive but avoids artifacts
+ * For now, returns empty string (bypass) until Noise Sampling DSP is wired end-to-end.
  *
- * Capped at 40dB to prevent metallic artifacts common at higher values.
+ * @param nr - Noise reduction parameters (currently unused, reserved for future)
+ * @returns Empty string (bypass) until audio_pro-5a3 is implemented
  */
 export function buildNoiseReductionFilter(nr: NoiseReductionParams): string {
-  if (!nr.enabled || nr.strength <= 0) return ''
-
-  // Map strength 0-100 to nr (noise reduction) 0-40 dB
-  const nrValue = Math.round((nr.strength / 100) * 40)
-
-  // Map strength to noise floor: -50 at 0% to -35 at 100%
-  // Higher floor = less aggressive (avoids eating wanted audio)
-  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
-
-  // Enable noise tracking for adaptive behavior
-  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
+  // PLACEHOLDER: Noise Sampling DSP will be implemented in bead audio_pro-5a3
+  // This stage is reserved for profile-based noise reduction using noiseSampleRegion
+  // For now, bypass (return empty string) until Noise Sampling DSP is wired
+  return ''
 }
 
 /**
