@@ -511,7 +511,7 @@ export function buildCompressorFilter(comp: CompressorParams): string {
  * Build Noise Sampling DSP filter using noiseSampleRegion.
  *
  * Deterministic behavior:
- * - If noiseSampleRegion exists AND noiseReduction.enabled: apply Noise Sampling DSP
+ * - If noiseSampleRegion exists AND noiseReduction.enabled: apply afftdn with conservative settings
  * - If region missing OR noiseReduction.disabled: explicit bypass (return empty string)
  *
  * This ensures:
@@ -521,13 +521,7 @@ export function buildCompressorFilter(comp: CompressorParams): string {
  *
  * @param nr - Noise reduction parameters (enabled flag and strength)
  * @param region - Noise sample region (QuietCandidate with startMs/endMs)
- * @returns Noise Sampling DSP filter string or empty string (bypass)
- *
- * TODO: Implement actual Noise Sampling DSP that uses region.startMs/endMs for noise profiling.
- * Possible approaches:
- * - Two-pass: extract noise profile from region, apply to full audio
- * - Spectral subtraction using region as noise reference
- * - Alternative denoising filter that accepts noise sample input
+ * @returns FFmpeg afftdn filter string or empty string (bypass)
  */
 export function buildNoiseReductionFilter(nr: NoiseReductionParams, region: QuietCandidate | null): string {
   // Explicit bypass if disabled or no region
@@ -535,10 +529,16 @@ export function buildNoiseReductionFilter(nr: NoiseReductionParams, region: Quie
     return ''
   }
 
-  // TODO: Implement Noise Sampling DSP using region.startMs, region.endMs, and nr.strength
-  // For now, return empty string (bypass) until proper implementation is added
-  console.log('[Noise Sampling DSP] Bypassed - awaiting implementation. Region:', region, 'Strength:', nr.strength)
-  return ''
+  // Region exists and NR enabled: use conservative afftdn settings
+  // Map strength 0-100 to nr (noise reduction) 0-40 dB
+  const nrValue = Math.round((nr.strength / 100) * 40)
+
+  // Map strength to noise floor: -50 at 0% to -35 at 100%
+  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
+
+  // Enable noise tracking for adaptive behavior
+  // Note: Future enhancement could use region timing for two-pass profiling
+  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
 }
 
 /**
@@ -773,39 +773,14 @@ export async function analyzeLoudness(
 }
 
 /**
- * Build AutoGain/Leveling filter (placeholder for canonical chain position 1).
- * TODO: Implement input level normalization
- */
-export function buildAutoGainFilter(): string {
-  return ''  // Placeholder
-}
-
-/**
- * Build Loudness filter (placeholder for canonical chain position 2).
- * TODO: Implement loudness normalization stage
- */
-export function buildLoudnessFilter(): string {
-  return ''  // Placeholder
-}
-
-/**
  * Build full audio filter chain.
  *
- * CANONICAL Signal chain order (LOCKED):
- *   1. AutoGain / Leveling
- *   2. Loudness
- *   3. Noise Sampling DSP
- *   4. Highpass
- *   5. Lowpass
- *   6. EQ
- *   7. Compressor
- *   8. AutoMix
+ * Signal chain order (when enabled):
+ *   NR → HPF → LPF → EQ → Compressor → AutoMix
  *
  * Rationale:
- * - AutoGain first: normalize input level
- * - Loudness second: loudness target/normalization
- * - Noise Sampling third: remove noise before frequency shaping
- * - HPF/LPF: bandwidth limiting before tonal adjustment
+ * - NR first: removes noise before any frequency shaping
+ * - HPF/LPF next: bandwidth limiting before tonal adjustment
  * - EQ: tonal shaping on clean, bandwidth-limited signal
  * - Compressor: dynamics control on shaped signal
  * - AutoMix last: final-stage leveling as output processor
@@ -813,47 +788,35 @@ export function buildLoudnessFilter(): string {
 export function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix: AutoMixParams | undefined, noiseSampleRegion: QuietCandidate | null): string {
   const filters: string[] = []
 
-  // 1. AutoGain / Leveling (placeholder)
-  const autoGainFilter = buildAutoGainFilter()
-  if (autoGainFilter) {
-    filters.push(autoGainFilter)
-  }
-
-  // 2. Loudness (placeholder)
-  const loudnessFilter = buildLoudnessFilter()
-  if (loudnessFilter) {
-    filters.push(loudnessFilter)
-  }
-
-  // 3. Noise Sampling DSP
+  // 1. Noise Sampling DSP (first - remove noise before any processing)
   const nrFilter = buildNoiseReductionFilter(noiseReduction, noiseSampleRegion)
   if (nrFilter) {
     filters.push(nrFilter)
   }
 
-  // 4. High-pass filter
+  // 2. High-pass filter (bandwidth limiting)
   if (hpf.enabled) {
     filters.push(`highpass=f=${hpf.frequency}`)
   }
 
-  // 5. Low-pass filter
+  // 3. Low-pass filter (bandwidth limiting)
   if (lpf.enabled) {
     filters.push(`lowpass=f=${lpf.frequency}`)
   }
 
-  // 6. Parametric EQ bands
+  // 4. Parametric EQ bands (tonal shaping)
   const eqFilter = buildEQFilter(bands)
   if (eqFilter) {
     filters.push(eqFilter)
   }
 
-  // 7. Compressor/Limiter
+  // 5. Compressor/Limiter (dynamics control)
   const compFilter = buildCompressorFilter(compressor)
   if (compFilter) {
     filters.push(compFilter)
   }
 
-  // 8. AutoMix (final-stage leveling)
+  // 6. AutoMix (final-stage leveling - always last)
   if (autoMix) {
     const autoMixFilter = buildAutoMixFilter(autoMix)
     if (autoMixFilter) {

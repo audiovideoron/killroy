@@ -69,10 +69,12 @@ function buildCompressorFilter(comp: CompressorParams): string {
 }
 
 function buildNoiseReductionFilter(nr: NoiseReductionParams): string {
-  // Noise Sampling DSP - afftdn removed per canonical spec
-  // Returns empty string (bypass) until real implementation
   if (!nr.enabled || nr.strength <= 0) return ''
-  return ''  // Placeholder - no afftdn
+
+  const nrValue = Math.round((nr.strength / 100) * 40)
+  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
+
+  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
 }
 
 function buildAutoMixFilter(autoMix: AutoMixParams): string {
@@ -93,52 +95,41 @@ function buildAutoMixFilter(autoMix: AutoMixParams): string {
 /**
  * Build full audio filter chain.
  *
- * CANONICAL Signal chain order (LOCKED):
- *   1. AutoGain / Leveling
- *   2. Loudness
- *   3. Noise Sampling DSP
- *   4. Highpass
- *   5. Lowpass
- *   6. EQ
- *   7. Compressor
- *   8. AutoMix
+ * Signal chain order (when enabled):
+ *   NR → HPF → LPF → EQ → Compressor → AutoMix
  */
 function buildFullFilterChain(hpf: FilterParams, bands: EQBand[], lpf: FilterParams, compressor: CompressorParams, noiseReduction: NoiseReductionParams, autoMix?: AutoMixParams): string {
   const filters: string[] = []
 
-  // 1. AutoGain / Leveling (placeholder)
-  // 2. Loudness (placeholder)
-  // Both placeholders return empty strings for now
-
-  // 3. Noise Sampling DSP (afftdn removed)
+  // 1. Noise reduction (first - remove noise before any processing)
   const nrFilter = buildNoiseReductionFilter(noiseReduction)
   if (nrFilter) {
     filters.push(nrFilter)
   }
 
-  // 4. High-pass filter
+  // 2. High-pass filter (bandwidth limiting)
   if (hpf.enabled) {
     filters.push(`highpass=f=${hpf.frequency}`)
   }
 
-  // 5. Low-pass filter
+  // 3. Low-pass filter (bandwidth limiting)
   if (lpf.enabled) {
     filters.push(`lowpass=f=${lpf.frequency}`)
   }
 
-  // 6. Parametric EQ bands
+  // 4. Parametric EQ bands (tonal shaping)
   const eqFilter = buildEQFilter(bands)
   if (eqFilter) {
     filters.push(eqFilter)
   }
 
-  // 7. Compressor/Limiter
+  // 5. Compressor/Limiter (dynamics control)
   const compFilter = buildCompressorFilter(compressor)
   if (compFilter) {
     filters.push(compFilter)
   }
 
-  // 8. AutoMix (final-stage leveling)
+  // 6. AutoMix (final-stage leveling - always last)
   if (autoMix) {
     const autoMixFilter = buildAutoMixFilter(autoMix)
     if (autoMixFilter) {
@@ -630,26 +621,87 @@ describe('buildNoiseReductionFilter', () => {
     expect(result).toBe('')
   })
 
-  it('returns empty string (bypass) - afftdn removed', () => {
+  it('builds filter with light reduction (strength 25)', () => {
     const nr: NoiseReductionParams = {
       strength: 25,
       enabled: true
     }
     const result = buildNoiseReductionFilter(nr)
-    expect(result).toBe('')
+    const nrValue = Math.round((25 / 100) * 40)
+    const nfValue = Math.round(-50 + (25 / 100) * 15)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
   })
 
-  it('returns empty string for all strength values - afftdn removed', () => {
-    const strengths = [1, 25, 50, 75, 100]
-    strengths.forEach(strength => {
-      const nr: NoiseReductionParams = { strength, enabled: true }
-      const result = buildNoiseReductionFilter(nr)
-      expect(result).toBe('')
-    })
+  it('builds filter with moderate reduction (strength 50)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 50,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    const nrValue = Math.round((50 / 100) * 40)
+    const nfValue = Math.round(-50 + (50 / 100) * 15)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
   })
 
+  it('builds filter with strong reduction (strength 75)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 75,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    const nrValue = Math.round((75 / 100) * 40)
+    const nfValue = Math.round(-50 + (75 / 100) * 15)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
+  })
+
+  it('builds filter with maximum reduction (strength 100)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 100,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    expect(result).toBe('afftdn=nr=40:nf=-35:tn=true')
+  })
+
+  it('maps strength 1 to minimum values', () => {
+    const nr: NoiseReductionParams = {
+      strength: 1,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    const nrValue = Math.round((1 / 100) * 40)
+    const nfValue = Math.round(-50 + (1 / 100) * 15)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
+  })
+
+  it('always enables noise tracking (tn=true)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 60,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    expect(result).toContain(':tn=true')
+  })
+
+  it('correctly maps strength to noise reduction value (0-40 dB)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 50,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    expect(result).toContain('nr=20')
+  })
+
+  it('correctly maps strength to noise floor value (-50 to -35 dB)', () => {
+    const nr: NoiseReductionParams = {
+      strength: 50,
+      enabled: true
+    }
+    const result = buildNoiseReductionFilter(nr)
+    const expectedNf = Math.round(-50 + (50 / 100) * 15)
+    expect(result).toContain(`nf=${expectedNf}`)
+  })
 })
-// Note: Additional parameter mapping tests removed since afftdn is no longer used
 
 describe('buildFullFilterChain', () => {
   const createDefaultParams = () => ({
@@ -694,7 +746,7 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe('highpass=f=80')
   })
 
-  it('returns empty string when only noise reduction enabled (afftdn removed)', () => {
+  it('builds chain with only noise reduction enabled', () => {
     const params = createDefaultParams()
     params.noiseReduction.enabled = true
     params.noiseReduction.strength = 50
@@ -705,7 +757,9 @@ describe('buildFullFilterChain', () => {
       params.compressor,
       params.noiseReduction
     )
-    expect(result).toBe('')  // Noise Sampling DSP bypassed
+    const nrValue = Math.round((50 / 100) * 40)
+    const nfValue = Math.round(-50 + (50 / 100) * 15)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
   })
 
   it('builds chain with only EQ enabled', () => {
@@ -752,7 +806,7 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe(`highpass=f=100,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`)
   })
 
-  it('builds complete chain in canonical order: HPF -> LPF -> EQ -> COMP (NR bypassed)', () => {
+  it('builds complete chain in correct order: NR -> HPF -> LPF -> EQ -> COMP', () => {
     const params = createDefaultParams()
     params.hpf.enabled = true
     params.hpf.frequency = 100
@@ -775,14 +829,15 @@ describe('buildFullFilterChain', () => {
       params.noiseReduction
     )
 
+    const nrValue = Math.round((50 / 100) * 40)
+    const nfValue = Math.round(-50 + (50 / 100) * 15)
     const eqWidth = 1000 / 1.5
     const attackSec = 10 / 1000
     const releaseSec = 100 / 1000
 
-    // Canonical order: AutoGain(placeholder) -> Loudness(placeholder) -> NR(bypassed) -> HPF -> LPF -> EQ -> Compressor
-    // Since placeholders and NR are bypassed, effective chain: HPF -> LPF -> EQ -> Compressor
+    // Order: NR -> HPF -> LPF -> EQ -> Compressor
     expect(result).toBe(
-      `highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
+      `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
     )
   })
 
@@ -879,7 +934,7 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe('highpass=f=50,lowpass=f=15000')
   })
 
-  it('noise reduction bypassed (afftdn removed), EQ works independently', () => {
+  it('handles noise reduction before EQ in signal chain', () => {
     const params = createDefaultParams()
     params.noiseReduction.enabled = true
     params.noiseReduction.strength = 75
@@ -895,10 +950,11 @@ describe('buildFullFilterChain', () => {
       params.noiseReduction
     )
 
+    const nrValue = Math.round((75 / 100) * 40)
+    const nfValue = Math.round(-50 + (75 / 100) * 15)
     const eqWidth = 2000 / 1.2
 
-    // NR bypassed, only EQ in chain
-    expect(result).toBe(`equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
+    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
   })
 
   it('places compressor after EQ and before AutoMix', () => {
@@ -964,15 +1020,17 @@ describe('buildFullFilterChain', () => {
       params.noiseReduction
     )
 
+    const nrValue = Math.round((40 / 100) * 40)
+    const nfValue = Math.round(-50 + (40 / 100) * 15)
     const width1 = 200 / 1.0
     const width2 = 2000 / 1.5
     const width3 = 8000 / 2.0
     const attackSec = 15 / 1000
     const releaseSec = 150 / 1000
 
-    // Canonical order: AutoGain(placeholder) -> Loudness(placeholder) -> NR(bypassed) -> HPF -> LPF -> EQ -> Compressor
-    // Effective chain (afftdn removed): HPF -> LPF -> EQ -> Compressor
+    // Order: NR -> HPF -> LPF -> EQ -> Compressor
     const expected = [
+      `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`,
       'highpass=f=75',
       'lowpass=f=16000',
       `equalizer=f=200:t=h:w=${width1}:g=2`,
@@ -1045,9 +1103,11 @@ describe('buildFullFilterChain', () => {
         autoMix
       )
 
-      // Canonical order: NR(bypassed) -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
-      // Effective chain (afftdn removed): LPF -> AutoMix
-      expect(result).toBe(`lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10`)
+      const nrValue = Math.round((50 / 100) * 40)
+      const nfValue = Math.round(-50 + (50 / 100) * 15)
+
+      // Order: NR -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
+      expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10`)
     })
 
     it('builds complete chain with AutoMix: NR -> HPF -> LPF -> EQ -> COMP -> AutoMix', () => {
@@ -1075,12 +1135,13 @@ describe('buildFullFilterChain', () => {
         autoMix
       )
 
+      const nrValue = Math.round((30 / 100) * 40)
+      const nfValue = Math.round(-50 + (30 / 100) * 15)
       const eqWidth = 1000 / 1.5
 
-      // Canonical chain: AutoGain(placeholder) -> Loudness(placeholder) -> NR(bypassed) -> HPF -> LPF -> EQ -> Compressor -> AutoMix
-      // Effective chain (afftdn removed): HPF -> LPF -> EQ -> Compressor -> AutoMix
+      // Full chain: NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix
       expect(result).toBe(
-        `highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
+        `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
       )
     })
 
@@ -1421,14 +1482,13 @@ describe('Toggle Wiring Audit', () => {
    * Toggle specifications - the definitive list of all toggle-controlled filters
    */
   const TOGGLE_SPECS: ToggleSpec[] = [
-    // NR (Noise Reduction) removed from toggle tests - afftdn removed, always returns empty string
-    // {
-    //   name: 'NR (Noise Reduction)',
-    //   filterPattern: /afftdn/,
-    //   getEnabledState: () => ({ strength: 50, enabled: true }),
-    //   getDisabledState: () => ({ strength: 50, enabled: false }),
-    //   buildFilter: (nr) => buildNoiseReductionFilter(nr)
-    // },
+    {
+      name: 'NR (Noise Reduction)',
+      filterPattern: /afftdn/,
+      getEnabledState: () => ({ strength: 50, enabled: true }),
+      getDisabledState: () => ({ strength: 50, enabled: false }),
+      buildFilter: (nr) => buildNoiseReductionFilter(nr)
+    },
     {
       name: 'HPF (High-Pass Filter)',
       filterPattern: /highpass/,
@@ -1536,7 +1596,7 @@ describe('Toggle Wiring Audit', () => {
       expect(chain).toBe('')
     })
 
-    it('only NR enabled → empty chain (afftdn removed, NR bypassed)', () => {
+    it('only NR enabled → only afftdn in chain', () => {
       const chain = buildFullFilterChain(
         defaultHpf,
         defaultBands,
@@ -1545,7 +1605,7 @@ describe('Toggle Wiring Audit', () => {
         { strength: 50, enabled: true },
         defaultAutoMix
       )
-      expect(chain).toBe('')  // NR bypassed, no filters
+      expect(chain).toMatch(/afftdn/)
       expect(chain).not.toMatch(/highpass/)
       expect(chain).not.toMatch(/lowpass/)
       expect(chain).not.toMatch(/equalizer/)
@@ -1648,7 +1708,7 @@ describe('Toggle Wiring Audit', () => {
       expect(chain).not.toMatch(/acompressor/)
     })
 
-    it('all toggles ON → all filters present in canonical order (NR bypassed)', () => {
+    it('all toggles ON → all filters present in correct order', () => {
       const allOnBands: EQBand[] = [
         { frequency: 200, gain: 2, q: 1.0, enabled: true },
         { frequency: 1000, gain: -1, q: 1.0, enabled: true },
@@ -1663,21 +1723,23 @@ describe('Toggle Wiring Audit', () => {
         { preset: 'MEDIUM', enabled: true }
       )
 
-      // All filters present except NR (afftdn removed)
-      expect(chain).not.toMatch(/afftdn/)  // NR bypassed
+      // All filters present
+      expect(chain).toMatch(/afftdn/)
       expect(chain).toMatch(/highpass/)
       expect(chain).toMatch(/lowpass/)
       expect(chain).toMatch(/equalizer/)
       expect(chain).toMatch(/acompressor/)
       expect(chain).toMatch(/dynaudnorm/)
 
-      // Verify canonical order: HPF → LPF → EQ → Comp → AutoMix (AutoGain, Loudness, NR all bypassed)
+      // Verify order: NR → HPF → LPF → EQ → Comp → AutoMix
+      const nrIndex = chain.indexOf('afftdn')
       const hpfIndex = chain.indexOf('highpass')
       const lpfIndex = chain.indexOf('lowpass')
       const eqIndex = chain.indexOf('equalizer')
       const compIndex = chain.indexOf('acompressor')
       const autoMixIndex = chain.indexOf('dynaudnorm')
 
+      expect(nrIndex).toBeLessThan(hpfIndex)
       expect(hpfIndex).toBeLessThan(lpfIndex)
       expect(lpfIndex).toBeLessThan(eqIndex)
       expect(eqIndex).toBeLessThan(compIndex)
