@@ -10,7 +10,7 @@ declare global {
         duration: number
         autoGain: any
         loudness: any
-        noiseReduction: any
+        noiseSampling: any
         hpf: any
         lpf: any
         bands: any[]
@@ -24,7 +24,7 @@ declare global {
         duration: number
         autoGain: any
         loudness: any
-        noiseReduction: any
+        noiseSampling: any
         hpf: any
         lpf: any
         bands: any[]

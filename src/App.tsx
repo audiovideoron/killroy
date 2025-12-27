@@ -6,7 +6,7 @@ import { VideoPreview, type VideoPreviewHandle } from './components/VideoPreview
 import { SourceControls } from './components/SourceControls'
 import { NoiseSampling } from './components/NoiseSampling'
 import { useJobProgress } from './hooks/useJobProgress'
-import type { EQBand, FilterParams, CompressorParams, NoiseReductionParams, AutoGainParams, LoudnessParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
+import type { EQBand, FilterParams, CompressorParams, NoiseSamplingParams, AutoGainParams, LoudnessParams, AutoMixParams, AutoMixPreset, QuietCandidate } from '../shared/types'
 import { AUTOGAIN_CONFIG, LOUDNESS_CONFIG } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 
@@ -51,7 +51,10 @@ function App() {
     enabled: false
   })
 
-  // 3. Noise Sampling DSP - see noiseReduction below
+  // 3. Noise Sampling DSP
+  const [noiseSampling, setNoiseSampling] = useState<NoiseSamplingParams>({
+    enabled: false
+  })
 
   // 4. High-pass filter
   const [hpf, setHpf] = useState<FilterParams>({ frequency: 80, q: 0.7, enabled: false })
@@ -68,11 +71,6 @@ function App() {
     makeup: 0,
     emphasis: 20,
     mode: 'COMP',
-    enabled: false
-  })
-
-  const [noiseReduction, setNoiseReduction] = useState<NoiseReductionParams>({
-    strength: 50,
     enabled: false
   })
 
@@ -93,7 +91,7 @@ function App() {
   const markDirtyAndSetHpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setHpf(v) }, [])
   const markDirtyAndSetLpf = useCallback((v: FilterParams) => { setProcessedDirty(true); setLpf(v) }, [])
   const markDirtyAndSetCompressor = useCallback((v: CompressorParams | ((prev: CompressorParams) => CompressorParams)) => { setProcessedDirty(true); setCompressor(v) }, [])
-  const markDirtyAndSetNoiseReduction = useCallback((v: NoiseReductionParams) => { setProcessedDirty(true); setNoiseReduction(v) }, [])
+  const markDirtyAndSetNoiseSampling = useCallback((v: NoiseSamplingParams) => { setProcessedDirty(true); setNoiseSampling(v) }, [])
   const markDirtyAndSetAutoMix = useCallback((v: AutoMixParams) => { setProcessedDirty(true); setAutoMix(v) }, [])
 
   // Handle noise sample region acceptance
@@ -130,7 +128,7 @@ function App() {
         duration: durationSec,
         autoGain,
         loudness,
-        noiseReduction,
+        noiseSampling,
         hpf,
         lpf,
         bands,
@@ -169,7 +167,7 @@ function App() {
       console.log('[requestPreview] ========== ERROR ==========')
       console.log('[requestPreview] exception:', err)
     }
-  }, [filePath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
+  }, [filePath, autoGain, loudness, noiseSampling, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
 
   // "Preview" button handler - delegates to global preview pipeline
   // Uses fixed PREVIEW_DURATION_SEC per investigation doc
@@ -192,7 +190,7 @@ function App() {
         duration: 0, // Full file - duration determined by main process
         autoGain,
         loudness,
-        noiseReduction,
+        noiseSampling,
         hpf,
         lpf,
         bands,
@@ -215,7 +213,7 @@ function App() {
       setStatus('error')
       setErrorMsg(String(err))
     }
-  }, [filePath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
+  }, [filePath, autoGain, loudness, noiseSampling, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion])
 
   // Handle AutoMix preset selection - configures full processing chain
   const handleAutoMixPresetChange = useCallback((preset: AutoMixPreset) => {
@@ -229,13 +227,13 @@ function App() {
     // All presets enable HPF at 120Hz for speech
     if (preset === 'LIGHT') {
       // LIGHT: AutoMix + HPF 120Hz only
-      setNoiseReduction({ strength: 50, enabled: false })
+      setNoiseSampling({ enabled: false })
       setCompressor(prev => ({ ...prev, enabled: false }))
       setHpf({ frequency: 120, q: 0.7, enabled: true })
       setLpf(prev => ({ ...prev, enabled: false }))
     } else if (preset === 'MEDIUM') {
-      // MEDIUM: AutoMix + HPF 120Hz + NR 25% + Comp (-18dB, 3:1)
-      setNoiseReduction({ strength: 25, enabled: true })
+      // MEDIUM: AutoMix + HPF 120Hz + Noise Sampling + Comp (-18dB, 3:1)
+      setNoiseSampling({ enabled: true })
       setCompressor({
         threshold: -18,
         ratio: 3,
@@ -249,8 +247,8 @@ function App() {
       setHpf({ frequency: 120, q: 0.7, enabled: true })
       setLpf(prev => ({ ...prev, enabled: false }))
     } else if (preset === 'HEAVY') {
-      // HEAVY: AutoMix + HPF 120Hz + NR 50% + Comp (-15dB, 4:1)
-      setNoiseReduction({ strength: 50, enabled: true })
+      // HEAVY: AutoMix + HPF 120Hz + Noise Sampling + Comp (-15dB, 4:1)
+      setNoiseSampling({ enabled: true })
       setCompressor({
         threshold: -15,
         ratio: 4,
@@ -434,13 +432,13 @@ function App() {
         hpf={hpf}
         lpf={lpf}
         compressor={compressor}
-        noiseReduction={noiseReduction}
+        noiseSampling={noiseSampling}
         autoMix={autoMix}
         onBandUpdate={updateBand}
         onHpfChange={markDirtyAndSetHpf}
         onLpfChange={markDirtyAndSetLpf}
         onCompressorChange={markDirtyAndSetCompressor}
-        onNoiseReductionChange={markDirtyAndSetNoiseReduction}
+        onNoiseSamplingChange={markDirtyAndSetNoiseSampling}
         onAutoMixChange={markDirtyAndSetAutoMix}
         onAutoMixPresetChange={handleAutoMixPresetChange}
       />

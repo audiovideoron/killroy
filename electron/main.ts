@@ -14,7 +14,7 @@ import {
   buildFullFilterChain,
   buildEQFilter,
   buildCompressorFilter,
-  buildNoiseReductionFilter,
+  buildNoiseSamplingFilter,
   probeMediaMetadata,
   createJobTempDir,
   cleanupJobTempDir,
@@ -159,7 +159,7 @@ ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
 })
 
 ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
-  const { inputPath, startTime, duration, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
+  const { inputPath, startTime, duration, autoGain, loudness, noiseSampling, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
 
   try {
     // VALIDATION: Verify input path before any FFmpeg/ffprobe execution
@@ -255,11 +255,11 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
     await tryRenderStrategies(originalAttempts, 'original-preview', duration, 'original-preview', jobId, mainWindow)
 
     // Build full filter chain with all 8 stages:
-    // AutoGain → Loudness → NR → HPF → LPF → EQ → Compressor → AutoMix
+    // AutoGain → Loudness → Noise Sampling → HPF → LPF → EQ → Compressor → AutoMix
     const filterChain = buildFullFilterChain(
       autoGain,
       loudness,
-      noiseReduction,
+      noiseSampling,
       hpf,
       lpf,
       bands,
@@ -375,7 +375,7 @@ ipcMain.handle('cancel-render', (_event, jobId: string) => {
  * Non-accumulative: always starts from original source
  */
 ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
-  const { inputPath, autoGain, loudness, noiseReduction, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
+  const { inputPath, autoGain, loudness, noiseSampling, hpf, lpf, bands, compressor, autoMix, noiseSampleRegion } = options
 
   try {
     // Validate input path
@@ -416,11 +416,11 @@ ipcMain.handle('render-full-audio', async (_event, options: RenderOptions) => {
     const durationSec = parseFloat(metadata.format.duration || '0')
 
     // Build full filter chain with all 8 stages (same as preview):
-    // AutoGain → Loudness → NR → HPF → LPF → EQ → Compressor → AutoMix
+    // AutoGain → Loudness → Noise Sampling → HPF → LPF → EQ → Compressor → AutoMix
     const filterChain = buildFullFilterChain(
       autoGain,
       loudness,
-      noiseReduction,
+      noiseSampling,
       hpf,
       lpf,
       bands,

@@ -27,8 +27,7 @@ export interface CompressorParams {
   enabled: boolean
 }
 
-export interface NoiseReductionParams {
-  strength: number     // 0-100, maps to afftdn parameters
+export interface NoiseSamplingParams {
   enabled: boolean
 }
 
@@ -72,7 +71,7 @@ export interface RenderOptions {
   duration: number
   autoGain: AutoGainParams
   loudness: LoudnessParams
-  noiseReduction: NoiseReductionParams
+  noiseSampling: NoiseSamplingParams
   hpf: FilterParams
   lpf: FilterParams
   bands: EQBand[]

@@ -1,9 +1,10 @@
-import { Knob, Toggle } from './Knob'
+import { Toggle } from './Knob'
+import { Knob } from './Knob'
 import type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams,
+  NoiseSamplingParams,
   AutoMixParams,
   AutoMixPreset
 } from '../../shared/types'
@@ -13,13 +14,13 @@ interface AudioControlsProps {
   hpf: FilterParams
   lpf: FilterParams
   compressor: CompressorParams
-  noiseReduction: NoiseReductionParams
+  noiseSampling: NoiseSamplingParams
   autoMix: AutoMixParams
   onBandUpdate: (index: number, field: keyof EQBand, value: number | boolean) => void
   onHpfChange: (hpf: FilterParams) => void
   onLpfChange: (lpf: FilterParams) => void
   onCompressorChange: (compressor: CompressorParams) => void
-  onNoiseReductionChange: (noiseReduction: NoiseReductionParams) => void
+  onNoiseSamplingChange: (noiseSampling: NoiseSamplingParams) => void
   onAutoMixChange: (autoMix: AutoMixParams) => void
   onAutoMixPresetChange: (preset: AutoMixPreset) => void
 }
@@ -29,13 +30,13 @@ export function AudioControls({
   hpf,
   lpf,
   compressor,
-  noiseReduction,
+  noiseSampling,
   autoMix,
   onBandUpdate,
   onHpfChange,
   onLpfChange,
   onCompressorChange,
-  onNoiseReductionChange,
+  onNoiseSamplingChange,
   onAutoMixChange,
   onAutoMixPresetChange
 }: AudioControlsProps) {
@@ -139,23 +140,19 @@ export function AudioControls({
           boxShadow: 'inset 0 -1px 0 rgba(255,255,255,0.05)',
           background: 'linear-gradient(180deg, rgba(255,255,255,0.02) 0%, transparent 100%)'
         }}>
-          <span style={{ fontSize: 10, color: '#888', fontWeight: 600, letterSpacing: 2 }}>NR/COMP</span>
+          <span style={{ fontSize: 10, color: '#888', fontWeight: 600, letterSpacing: 2 }}>COMP</span>
         </div>
 
-        {/* DENOISE Section - Noise Reduction (first in signal chain) */}
+        {/* Noise Sampling Section */}
         <div style={{
           padding: '6px 10px 8px',
           borderBottom: '1px solid rgba(0,0,0,0.4)',
           boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), inset 0 -1px 0 rgba(255,255,255,0.02)',
           background: 'linear-gradient(180deg, rgba(0,0,0,0.08) 0%, transparent 40%, rgba(255,255,255,0.02) 100%)'
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-            <span style={{ fontSize: 8, color: '#666', fontWeight: 600, letterSpacing: 1 }}>DENOISE</span>
-            <Toggle checked={noiseReduction.enabled} onChange={v => onNoiseReductionChange({ ...noiseReduction, enabled: v })} />
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Knob value={noiseReduction.strength} min={0} max={100} defaultValue={50}
-              onChange={v => onNoiseReductionChange({ ...noiseReduction, strength: v })} label="STR" unit="%" size={42} emphasis={noiseReduction.enabled ? 'primary' : 'tertiary'} />
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 8, color: '#666', fontWeight: 600, letterSpacing: 1 }}>NOISE SAMPLING</span>
+            <Toggle checked={noiseSampling.enabled} onChange={v => onNoiseSamplingChange({ enabled: v })} />
           </div>
         </div>
 

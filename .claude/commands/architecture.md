@@ -199,7 +199,7 @@ function App() {
   const [hpf, setHpf] = useState({...})
   const [lpf, setLpf] = useState({...})
   const [compressor, setCompressor] = useState({...})
-  const [noiseReduction, setNoiseReduction] = useState({...})
+  const [noiseSampling, setNoiseSampling] = useState({...})
   // 10+ useState calls, 500+ lines of handlers
 }
 ```

@@ -3,7 +3,7 @@ import type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams,
+  NoiseSamplingParams,
   AutoGainParams,
   LoudnessParams,
   AutoMixParams,
@@ -97,14 +97,12 @@ function buildLoudnessFilter(loudness: LoudnessParams): string {
 
 /**
  * Build Noise Sampling DSP filter using noiseSampleRegion.
+ * Toggle-only: enabled=true uses fixed parameters.
  */
-function buildNoiseReductionFilter(nr: NoiseReductionParams, region: QuietCandidate | null): string {
-  if (!nr.enabled || !region || nr.strength <= 0) return ''
+function buildNoiseSamplingFilter(ns: NoiseSamplingParams, region: QuietCandidate | null): string {
+  if (!ns.enabled || !region) return ''
 
-  const nrValue = Math.round((nr.strength / 100) * 40)
-  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
-
-  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
+  return 'afftdn=nr=20:nf=-42:tn=true'
 }
 
 function buildAutoMixFilter(autoMix: AutoMixParams): string {
@@ -132,7 +130,7 @@ function buildAutoMixFilter(autoMix: AutoMixParams): string {
 function buildFullFilterChain(
   autoGain: AutoGainParams,
   loudness: LoudnessParams,
-  noiseReduction: NoiseReductionParams,
+  noiseSampling: NoiseSamplingParams,
   hpf: FilterParams,
   lpf: FilterParams,
   bands: EQBand[],
@@ -155,9 +153,9 @@ function buildFullFilterChain(
   }
 
   // 3. Noise Sampling DSP (noise reduction before frequency shaping)
-  const nrFilter = buildNoiseReductionFilter(noiseReduction, noiseSampleRegion)
-  if (nrFilter) {
-    filters.push(nrFilter)
+  const nsFilter = buildNoiseSamplingFilter(noiseSampling, noiseSampleRegion)
+  if (nsFilter) {
+    filters.push(nsFilter)
   }
 
   // 4. High-pass filter (bandwidth limiting)
@@ -644,125 +642,44 @@ describe('buildCompressorFilter', () => {
   })
 })
 
-describe('buildNoiseReductionFilter', () => {
-  // Default region for tests that need NR to apply
+describe('buildNoiseSamplingFilter', () => {
+  // Default region for tests that need noise sampling to apply
   const defaultRegion: QuietCandidate = { startMs: 0, endMs: 1000 }
 
   it('returns empty string when disabled', () => {
-    const nr: NoiseReductionParams = {
-      strength: 50,
-      enabled: false
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
+    const ns: NoiseSamplingParams = { enabled: false }
+    const result = buildNoiseSamplingFilter(ns, defaultRegion)
     expect(result).toBe('')
   })
 
   it('returns empty string when no region provided', () => {
-    const nr: NoiseReductionParams = {
-      strength: 50,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, null)
+    const ns: NoiseSamplingParams = { enabled: true }
+    const result = buildNoiseSamplingFilter(ns, null)
     expect(result).toBe('')
   })
 
-  it('returns empty string when strength is 0', () => {
-    const nr: NoiseReductionParams = {
-      strength: 0,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    expect(result).toBe('')
-  })
-
-  it('returns empty string when strength is negative', () => {
-    const nr: NoiseReductionParams = {
-      strength: -10,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    expect(result).toBe('')
-  })
-
-  it('builds filter with light reduction (strength 25)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 25,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    const nrValue = Math.round((25 / 100) * 40)
-    const nfValue = Math.round(-50 + (25 / 100) * 15)
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
-  })
-
-  it('builds filter with moderate reduction (strength 50)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 50,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    const nrValue = Math.round((50 / 100) * 40)
-    const nfValue = Math.round(-50 + (50 / 100) * 15)
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
-  })
-
-  it('builds filter with strong reduction (strength 75)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 75,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    const nrValue = Math.round((75 / 100) * 40)
-    const nfValue = Math.round(-50 + (75 / 100) * 15)
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
-  })
-
-  it('builds filter with maximum reduction (strength 100)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 100,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    expect(result).toBe('afftdn=nr=40:nf=-35:tn=true')
-  })
-
-  it('maps strength 1 to minimum values', () => {
-    const nr: NoiseReductionParams = {
-      strength: 1,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    const nrValue = Math.round((1 / 100) * 40)
-    const nfValue = Math.round(-50 + (1 / 100) * 15)
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
+  it('builds filter with fixed parameters when enabled', () => {
+    const ns: NoiseSamplingParams = { enabled: true }
+    const result = buildNoiseSamplingFilter(ns, defaultRegion)
+    expect(result).toBe('afftdn=nr=20:nf=-42:tn=true')
   })
 
   it('always enables noise tracking (tn=true)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 60,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
+    const ns: NoiseSamplingParams = { enabled: true }
+    const result = buildNoiseSamplingFilter(ns, defaultRegion)
     expect(result).toContain(':tn=true')
   })
 
-  it('correctly maps strength to noise reduction value (0-40 dB)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 50,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
+  it('uses fixed nr=20 (moderate reduction)', () => {
+    const ns: NoiseSamplingParams = { enabled: true }
+    const result = buildNoiseSamplingFilter(ns, defaultRegion)
     expect(result).toContain('nr=20')
   })
 
-  it('correctly maps strength to noise floor value (-50 to -35 dB)', () => {
-    const nr: NoiseReductionParams = {
-      strength: 50,
-      enabled: true
-    }
-    const result = buildNoiseReductionFilter(nr, defaultRegion)
-    const expectedNf = Math.round(-50 + (50 / 100) * 15)
-    expect(result).toContain(`nf=${expectedNf}`)
+  it('uses fixed nf=-42 (noise floor)', () => {
+    const ns: NoiseSamplingParams = { enabled: true }
+    const result = buildNoiseSamplingFilter(ns, defaultRegion)
+    expect(result).toContain('nf=-42')
   })
 })
 
@@ -770,7 +687,7 @@ describe('buildFullFilterChain', () => {
   const createDefaultParams = () => ({
     autoGain: { targetLevel: -6, enabled: false } as AutoGainParams,
     loudness: { targetLufs: -14, enabled: false } as LoudnessParams,
-    noiseReduction: { strength: 0, enabled: false } as NoiseReductionParams,
+    noiseSampling: { enabled: false } as NoiseSamplingParams,
     hpf: { frequency: 80, q: 0.7, enabled: false } as FilterParams,
     lpf: { frequency: 12000, q: 0.7, enabled: false } as FilterParams,
     bands: [] as EQBand[],
@@ -793,7 +710,7 @@ describe('buildFullFilterChain', () => {
     buildFullFilterChain(
       params.autoGain,
       params.loudness,
-      params.noiseReduction,
+      params.noiseSampling,
       params.hpf,
       params.lpf,
       params.bands,
@@ -815,14 +732,11 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe('highpass=f=80')
   })
 
-  it('builds chain with only noise reduction enabled', () => {
+  it('builds chain with only noise sampling enabled', () => {
     const params = createDefaultParams()
-    params.noiseReduction.enabled = true
-    params.noiseReduction.strength = 50
+    params.noiseSampling.enabled = true
     const result = callChain(params)
-    const nrValue = Math.round((50 / 100) * 40)
-    const nfValue = Math.round(-50 + (50 / 100) * 15)
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`)
+    expect(result).toBe('afftdn=nr=20:nf=-42:tn=true')
   })
 
   it('builds chain with only EQ enabled', () => {
@@ -851,12 +765,11 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe(`highpass=f=100,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`)
   })
 
-  it('builds complete chain in correct order: NR -> HPF -> LPF -> EQ -> COMP', () => {
+  it('builds complete chain in correct order: NS -> HPF -> LPF -> EQ -> COMP', () => {
     const params = createDefaultParams()
     params.hpf.enabled = true
     params.hpf.frequency = 100
-    params.noiseReduction.enabled = true
-    params.noiseReduction.strength = 50
+    params.noiseSampling.enabled = true
     params.bands = [
       { frequency: 1000, gain: 3, q: 1.5, enabled: true }
     ]
@@ -868,15 +781,13 @@ describe('buildFullFilterChain', () => {
 
     const result = callChain(params)
 
-    const nrValue = Math.round((50 / 100) * 40)
-    const nfValue = Math.round(-50 + (50 / 100) * 15)
     const eqWidth = 1000 / 1.5
     const attackSec = 10 / 1000
     const releaseSec = 100 / 1000
 
-    // Order: NR -> HPF -> LPF -> EQ -> Compressor
+    // Order: Noise Sampling -> HPF -> LPF -> EQ -> Compressor
     expect(result).toBe(
-      `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
+      `afftdn=nr=20:nf=-42:tn=true,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
     )
   })
 
@@ -949,21 +860,18 @@ describe('buildFullFilterChain', () => {
     expect(result).toBe('highpass=f=50,lowpass=f=15000')
   })
 
-  it('handles noise reduction before EQ in signal chain', () => {
+  it('handles noise sampling before EQ in signal chain', () => {
     const params = createDefaultParams()
-    params.noiseReduction.enabled = true
-    params.noiseReduction.strength = 75
+    params.noiseSampling.enabled = true
     params.bands = [
       { frequency: 2000, gain: 6, q: 1.2, enabled: true }
     ]
 
     const result = callChain(params)
 
-    const nrValue = Math.round((75 / 100) * 40)
-    const nfValue = Math.round(-50 + (75 / 100) * 15)
     const eqWidth = 2000 / 1.2
 
-    expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
+    expect(result).toBe(`afftdn=nr=20:nf=-42:tn=true,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
   })
 
   it('places compressor after EQ and before AutoMix', () => {
@@ -997,8 +905,7 @@ describe('buildFullFilterChain', () => {
     const params = createDefaultParams()
     params.hpf.enabled = true
     params.hpf.frequency = 75
-    params.noiseReduction.enabled = true
-    params.noiseReduction.strength = 40
+    params.noiseSampling.enabled = true
     params.bands = [
       { frequency: 200, gain: 2, q: 1.0, enabled: true },
       { frequency: 2000, gain: -1, q: 1.5, enabled: true },
@@ -1017,17 +924,15 @@ describe('buildFullFilterChain', () => {
 
     const result = callChain(params)
 
-    const nrValue = Math.round((40 / 100) * 40)
-    const nfValue = Math.round(-50 + (40 / 100) * 15)
     const width1 = 200 / 1.0
     const width2 = 2000 / 1.5
     const width3 = 8000 / 2.0
     const attackSec = 15 / 1000
     const releaseSec = 150 / 1000
 
-    // Order: NR -> HPF -> LPF -> EQ -> Compressor
+    // Order: Noise Sampling -> HPF -> LPF -> EQ -> Compressor
     const expected = [
-      `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`,
+      'afftdn=nr=20:nf=-42:tn=true',
       'highpass=f=75',
       'lowpass=f=16000',
       `equalizer=f=200:t=h:w=${width1}:g=2`,
@@ -1071,25 +976,20 @@ describe('buildFullFilterChain', () => {
 
     it('places AutoMix HEAVY preset after compressor as final stage', () => {
       const params = createDefaultParams()
-      params.noiseReduction.enabled = true
-      params.noiseReduction.strength = 50
+      params.noiseSampling.enabled = true
       params.lpf.enabled = true
       params.lpf.frequency = 12000
       params.autoMix = { enabled: true, preset: 'HEAVY' }
 
       const result = callChain(params)
 
-      const nrValue = Math.round((50 / 100) * 40)
-      const nfValue = Math.round(-50 + (50 / 100) * 15)
-
-      // Order: NR -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
-      expect(result).toBe(`afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10`)
+      // Order: Noise Sampling -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
+      expect(result).toBe('afftdn=nr=20:nf=-42:tn=true,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10')
     })
 
-    it('builds complete chain with AutoMix: NR -> HPF -> LPF -> EQ -> COMP -> AutoMix', () => {
+    it('builds complete chain with AutoMix: NS -> HPF -> LPF -> EQ -> COMP -> AutoMix', () => {
       const params = createDefaultParams()
-      params.noiseReduction.enabled = true
-      params.noiseReduction.strength = 30
+      params.noiseSampling.enabled = true
       params.hpf.enabled = true
       params.hpf.frequency = 120
       params.lpf.enabled = true
@@ -1104,13 +1004,11 @@ describe('buildFullFilterChain', () => {
 
       const result = callChain(params)
 
-      const nrValue = Math.round((30 / 100) * 40)
-      const nfValue = Math.round(-50 + (30 / 100) * 15)
       const eqWidth = 1000 / 1.5
 
-      // Full chain: NR -> HPF -> LPF -> EQ -> Compressor -> AutoMix
+      // Full chain: Noise Sampling -> HPF -> LPF -> EQ -> Compressor -> AutoMix
       expect(result).toBe(
-        `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
+        `afftdn=nr=20:nf=-42:tn=true,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
       )
     })
 
@@ -1430,22 +1328,22 @@ describe('Toggle Wiring Audit', () => {
     threshold: -18, ratio: 3, attack: 10, release: 100,
     makeup: 0, emphasis: 80, mode: 'COMP', enabled: false
   }
-  const defaultNR: NoiseReductionParams = { strength: 50, enabled: false }
+  const defaultNS: NoiseSamplingParams = { enabled: false }
   const defaultAutoMix: AutoMixParams = { preset: 'MEDIUM', enabled: false }
 
   /**
    * Toggle specifications - the definitive list of all toggle-controlled filters
    */
-  // Default region for noise reduction tests
+  // Default region for noise sampling tests
   const defaultRegion: QuietCandidate = { startMs: 0, endMs: 1000 }
 
   const TOGGLE_SPECS: ToggleSpec[] = [
     {
-      name: 'NR (Noise Reduction)',
+      name: 'Noise Sampling',
       filterPattern: /afftdn/,
-      getEnabledState: () => ({ strength: 50, enabled: true }),
-      getDisabledState: () => ({ strength: 50, enabled: false }),
-      buildFilter: (nr) => buildNoiseReductionFilter(nr, defaultRegion)
+      getEnabledState: () => ({ enabled: true }),
+      getDisabledState: () => ({ enabled: false }),
+      buildFilter: (ns) => buildNoiseSamplingFilter(ns, defaultRegion)
     },
     {
       name: 'HPF (High-Pass Filter)',
@@ -1546,11 +1444,11 @@ describe('Toggle Wiring Audit', () => {
     const defaultAutoGain: AutoGainParams = { targetLevel: -6, enabled: false }
     const defaultLoudness: LoudnessParams = { targetLufs: -14, enabled: false }
 
-    // Helper to call chain with new signature (uses enabled NR region)
+    // Helper to call chain with new signature (uses enabled NS region)
     const chain = (opts: {
       autoGain?: AutoGainParams,
       loudness?: LoudnessParams,
-      nr?: NoiseReductionParams,
+      ns?: NoiseSamplingParams,
       hpf?: FilterParams,
       lpf?: FilterParams,
       bands?: EQBand[],
@@ -1559,7 +1457,7 @@ describe('Toggle Wiring Audit', () => {
     }) => buildFullFilterChain(
       opts.autoGain ?? defaultAutoGain,
       opts.loudness ?? defaultLoudness,
-      opts.nr ?? defaultNR,
+      opts.ns ?? defaultNS,
       opts.hpf ?? defaultHpf,
       opts.lpf ?? defaultLpf,
       opts.bands ?? defaultBands,
@@ -1573,8 +1471,8 @@ describe('Toggle Wiring Audit', () => {
       expect(result).toBe('')
     })
 
-    it('only NR enabled → only afftdn in chain', () => {
-      const result = chain({ nr: { strength: 50, enabled: true } })
+    it('only Noise Sampling enabled → only afftdn in chain', () => {
+      const result = chain({ ns: { enabled: true } })
       expect(result).toMatch(/afftdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/lowpass/)
@@ -1650,7 +1548,7 @@ describe('Toggle Wiring Audit', () => {
         { frequency: 5000, gain: 3, q: 1.0, enabled: true }
       ]
       const result = chain({
-        nr: { strength: 50, enabled: true },
+        ns: { enabled: true },
         hpf: { frequency: 120, q: 0.7, enabled: true },
         lpf: { frequency: 8000, q: 0.7, enabled: true },
         bands: allOnBands,
@@ -1666,15 +1564,15 @@ describe('Toggle Wiring Audit', () => {
       expect(result).toMatch(/acompressor/)
       expect(result).toMatch(/dynaudnorm/)
 
-      // Verify order: NR → HPF → LPF → EQ → Comp → AutoMix
-      const nrIndex = result.indexOf('afftdn')
+      // Verify order: Noise Sampling → HPF → LPF → EQ → Comp → AutoMix
+      const nsIndex = result.indexOf('afftdn')
       const hpfIndex = result.indexOf('highpass')
       const lpfIndex = result.indexOf('lowpass')
       const eqIndex = result.indexOf('equalizer')
       const compIndex = result.indexOf('acompressor')
       const autoMixIndex = result.indexOf('dynaudnorm')
 
-      expect(nrIndex).toBeLessThan(hpfIndex)
+      expect(nsIndex).toBeLessThan(hpfIndex)
       expect(hpfIndex).toBeLessThan(lpfIndex)
       expect(lpfIndex).toBeLessThan(eqIndex)
       expect(eqIndex).toBeLessThan(compIndex)
@@ -1691,9 +1589,9 @@ describe('Toggle Wiring Audit', () => {
       expect(filter).toBe('')  // Zero gain = no audible effect = skip
     })
 
-    it('NR enabled with zero strength → filter absent', () => {
-      const filter = buildNoiseReductionFilter({ strength: 0, enabled: true }, defaultRegion)
-      expect(filter).toBe('')  // Zero strength = no effect = skip
+    it('Noise Sampling enabled with no region → filter absent', () => {
+      const filter = buildNoiseSamplingFilter({ enabled: true }, null)
+      expect(filter).toBe('')  // No region = no effect = skip
     })
 
     it('Compressor LEVEL mode with zero makeup → filter absent', () => {

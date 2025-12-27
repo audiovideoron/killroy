@@ -6,7 +6,7 @@ import type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams,
+  NoiseSamplingParams,
   AutoGainParams,
   LoudnessParams,
   AutoMixParams,
@@ -558,35 +558,30 @@ export function buildLoudnessFilter(loudness: LoudnessParams): string {
 /**
  * Build Noise Sampling DSP filter using noiseSampleRegion.
  *
- * Deterministic behavior:
- * - If noiseSampleRegion exists AND noiseReduction.enabled: apply afftdn with conservative settings
- * - If region missing OR noiseReduction.disabled: explicit bypass (return empty string)
+ * Toggle-only semantics:
+ * - If enabled AND region exists: apply afftdn with fixed conservative settings
+ * - If disabled OR no region: explicit bypass (return empty string)
  *
  * This ensures:
  * - noiseSampleRegion influences DSP parameters (acceptance criterion)
  * - Missing/invalid region produces deterministic bypass (no silent divergence)
  * - Preview and Render behave identically (both call this function)
  *
- * @param nr - Noise reduction parameters (enabled flag and strength)
+ * @param ns - Noise sampling parameters (enabled flag only)
  * @param region - Noise sample region (QuietCandidate with startMs/endMs)
  * @returns FFmpeg afftdn filter string or empty string (bypass)
  */
-export function buildNoiseReductionFilter(nr: NoiseReductionParams, region: QuietCandidate | null): string {
+export function buildNoiseSamplingFilter(ns: NoiseSamplingParams, region: QuietCandidate | null): string {
   // Explicit bypass if disabled or no region
-  if (!nr.enabled || !region || nr.strength <= 0) {
+  if (!ns.enabled || !region) {
     return ''
   }
 
-  // Region exists and NR enabled: use conservative afftdn settings
-  // Map strength 0-100 to nr (noise reduction) 0-40 dB
-  const nrValue = Math.round((nr.strength / 100) * 40)
-
-  // Map strength to noise floor: -50 at 0% to -35 at 100%
-  const nfValue = Math.round(-50 + (nr.strength / 100) * 15)
-
-  // Enable noise tracking for adaptive behavior
-  // Note: Future enhancement could use region timing for two-pass profiling
-  return `afftdn=nr=${nrValue}:nf=${nfValue}:tn=true`
+  // Region exists and enabled: use fixed conservative afftdn settings
+  // nr=20: moderate noise reduction (20 dB)
+  // nf=-42: noise floor threshold
+  // tn=true: enable noise tracking for adaptive behavior
+  return `afftdn=nr=20:nf=-42:tn=true`
 }
 
 /**
@@ -839,7 +834,7 @@ export async function analyzeLoudness(
 export function buildFullFilterChain(
   autoGain: AutoGainParams,
   loudness: LoudnessParams,
-  noiseReduction: NoiseReductionParams,
+  noiseSampling: NoiseSamplingParams,
   hpf: FilterParams,
   lpf: FilterParams,
   bands: EQBand[],
@@ -861,10 +856,10 @@ export function buildFullFilterChain(
     filters.push(loudnessFilter)
   }
 
-  // 3. Noise Sampling DSP (noise reduction before frequency shaping)
-  const nrFilter = buildNoiseReductionFilter(noiseReduction, noiseSampleRegion)
-  if (nrFilter) {
-    filters.push(nrFilter)
+  // 3. Noise Sampling DSP
+  const nsFilter = buildNoiseSamplingFilter(noiseSampling, noiseSampleRegion)
+  if (nsFilter) {
+    filters.push(nsFilter)
   }
 
   // 4. High-pass filter (bandwidth limiting)

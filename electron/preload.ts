@@ -7,7 +7,7 @@ export type {
   EQBand,
   FilterParams,
   CompressorParams,
-  NoiseReductionParams,
+  NoiseSamplingParams,
   RenderOptions,
   RenderResult,
   JobProgressEvent,

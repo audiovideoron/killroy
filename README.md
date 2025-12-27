@@ -71,7 +71,7 @@ Opens the app with hot reload and DevTools.
 1. Click **"Choose Video..."** and select a video file (MP4, MOV, MKV, AVI, WebM)
 2. Set the preview **start time** and **duration** in seconds
 3. Adjust audio processing:
-   - **NR/COMP strip** — Noise reduction and dynamics
+   - **COMP strip** — Noise sampling and dynamics
    - **EQ strip** — 3-band parametric EQ with HP/LP filters
 4. Click **"Render Preview"** to process through FFmpeg
 5. Use **"Play Original"** / **"Play Processed"** to A/B compare
@@ -79,7 +79,7 @@ Opens the app with hot reload and DevTools.
 ## Audio Signal Chain
 
 ```
-Input → HPF → Noise Reduction → EQ (3 bands) → LPF → Compressor/Limiter → Output
+Input → HPF → Noise Sampling → EQ (3 bands) → LPF → Compressor/Limiter → Output
 ```
 
 ## Transcript-Driven Editor (ASR)
