@@ -55,6 +55,7 @@ export function TranscriptPane({
         </div>
         {transcript && edl && (
           <TranscriptEditor
+            filePath={filePath}
             transcript={transcript}
             edl={edl}
             onEdlChange={onEdlChange}
@@ -90,6 +91,7 @@ export function TranscriptPane({
   if (transcript && edl) {
     return (
       <TranscriptEditor
+        filePath={filePath}
         transcript={transcript}
         edl={edl}
         onEdlChange={onEdlChange}

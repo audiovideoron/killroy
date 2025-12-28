@@ -39,6 +39,7 @@ declare global {
       saveDialog: (defaultPath: string) => Promise<string | null>
       cancelRender: (jobId: string) => Promise<{ cancelled: boolean; message: string }>
       detectQuietCandidates: (filePath: string) => Promise<any>
+      computePendingRemovals: (filePath: string, edl: any) => Promise<{ ranges: Array<{ start_ms: number; end_ms: number }>; total_removed_ms: number; duration_ms: number }>
     }
   }
 }

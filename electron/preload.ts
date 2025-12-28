@@ -53,5 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('save-dialog', defaultPath),
 
   detectQuietCandidates: (filePath: string): Promise<QuietCandidatesResult> =>
-    ipcRenderer.invoke('detect-quiet-candidates', filePath)
+    ipcRenderer.invoke('detect-quiet-candidates', filePath),
+
+  computePendingRemovals: (filePath: string, edl: EdlV1): Promise<{ ranges: Array<{ start_ms: number; end_ms: number }>; total_removed_ms: number; duration_ms: number }> =>
+    ipcRenderer.invoke('compute-pending-removals', filePath, edl)
 })

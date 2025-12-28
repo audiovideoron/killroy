@@ -1,15 +1,13 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
-import type {
-  RenderOptions,
-  EdlV1
-} from '../shared/types'
-import type { TranscriptV1 } from '../shared/editor-types'
+import type { RenderOptions } from '../shared/types'
+import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 import { extractVideoMetadata } from './media-metadata'
 import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
 import { getTranscriber } from './asr-adapter'
 import { renderFinal } from './final-render'
+import { buildEffectiveRemoveRanges } from './edl-engine'
 import {
   buildFullFilterChain,
   buildEQFilter,
@@ -553,6 +551,23 @@ ipcMain.handle('render-final', async (_event, filePath: string, edl: EdlV1, outp
       success: false,
       error: String(err)
     }
+  }
+})
+
+// Compute pending removal ranges - diagnostic only, no rendering
+ipcMain.handle('compute-pending-removals', async (_event, filePath: string, edl: EdlV1) => {
+  try {
+    const videoAsset = await extractVideoMetadata(filePath)
+    const effectiveRemoves = buildEffectiveRemoveRanges(edl, videoAsset.duration_ms)
+    const total_removed_ms = effectiveRemoves.reduce((sum, r) => sum + (r.end_ms - r.start_ms), 0)
+    return {
+      ranges: effectiveRemoves,
+      total_removed_ms,
+      duration_ms: videoAsset.duration_ms
+    }
+  } catch (err) {
+    console.error('[compute-pending-removals] Error:', err)
+    return { ranges: [], total_removed_ms: 0, duration_ms: 0 }
   }
 })
 

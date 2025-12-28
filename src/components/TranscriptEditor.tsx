@@ -2,11 +2,27 @@
  * Transcript Editor - Minimal word-based editor
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import type { TranscriptV1, TranscriptToken, EdlV1, RemoveRange } from '../../shared/editor-types'
 import { v4 as uuidv4 } from 'uuid'
 
+interface PendingRemovalsResult {
+  ranges: Array<{ start_ms: number; end_ms: number }>
+  total_removed_ms: number
+  duration_ms: number
+}
+
+// Format milliseconds as MM:SS.mmm
+function formatMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000)
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  const millis = ms % 1000
+  return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`
+}
+
 interface TranscriptEditorProps {
+  filePath: string
   transcript: TranscriptV1
   edl: EdlV1
   onEdlChange: (edl: EdlV1) => void
@@ -16,8 +32,21 @@ interface TranscriptEditorProps {
   exportSuccess: string | null
 }
 
-export function TranscriptEditor({ transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess }: TranscriptEditorProps) {
+export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess }: TranscriptEditorProps) {
   const [selectedTokenIds, setSelectedTokenIds] = useState<Set<string>>(new Set())
+  const [pendingRemovals, setPendingRemovals] = useState<PendingRemovalsResult | null>(null)
+
+  // Compute pending removals when edl changes
+  useEffect(() => {
+    if (edl.remove_ranges.length === 0) {
+      setPendingRemovals(null)
+      return
+    }
+
+    window.electronAPI.computePendingRemovals(filePath, edl)
+      .then(setPendingRemovals)
+      .catch(() => setPendingRemovals(null))
+  }, [filePath, edl])
 
   // Check if token is removed
   const isTokenRemoved = useCallback(
@@ -154,6 +183,44 @@ export function TranscriptEditor({ transcript, edl, onEdlChange, onExport, isExp
           marginBottom: 16
         }}>
           Export failed: {exportError}
+        </div>
+      )}
+
+      {/* Pending Removals Diagnostic */}
+      {pendingRemovals && pendingRemovals.ranges.length > 0 && (
+        <div style={{
+          padding: '12px',
+          background: '#2a2a2a',
+          border: '1px solid #444',
+          borderRadius: 4,
+          marginBottom: 16,
+          fontSize: 13,
+          fontFamily: 'monospace'
+        }}>
+          <div style={{ color: '#888', marginBottom: 8 }}>Pending Removals (effective ranges after padding/merge):</div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: '#aaa', textAlign: 'left' }}>
+                <th style={{ padding: '4px 8px' }}>#</th>
+                <th style={{ padding: '4px 8px' }}>Start</th>
+                <th style={{ padding: '4px 8px' }}>End</th>
+                <th style={{ padding: '4px 8px' }}>Duration</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendingRemovals.ranges.map((r, i) => (
+                <tr key={i} style={{ color: '#ddd' }}>
+                  <td style={{ padding: '4px 8px' }}>{i + 1}</td>
+                  <td style={{ padding: '4px 8px' }}>{formatMs(r.start_ms)}</td>
+                  <td style={{ padding: '4px 8px' }}>{formatMs(r.end_ms)}</td>
+                  <td style={{ padding: '4px 8px' }}>{formatMs(r.end_ms - r.start_ms)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #444', color: '#4fc3f7' }}>
+            Total removed: {formatMs(pendingRemovals.total_removed_ms)} / {formatMs(pendingRemovals.duration_ms)} ({((pendingRemovals.total_removed_ms / pendingRemovals.duration_ms) * 100).toFixed(1)}%)
+          </div>
         </div>
       )}
 

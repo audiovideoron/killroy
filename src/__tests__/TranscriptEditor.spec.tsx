@@ -1,9 +1,24 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { TranscriptEditor } from '../components/TranscriptEditor'
 import type { TranscriptV1, EdlV1 } from '../../shared/editor-types'
 
+// Mock electronAPI
+beforeEach(() => {
+  window.electronAPI = {
+    computePendingRemovals: vi.fn().mockResolvedValue({ ranges: [], total_removed_ms: 0, duration_ms: 10000 })
+  } as any
+})
+
 describe('STEP 5 Gate: Transcript Editor', () => {
+  const defaultProps = {
+    filePath: '/test/video.mp4',
+    onExport: vi.fn(),
+    isExporting: false,
+    exportError: null,
+    exportSuccess: null
+  }
+
   const mockTranscript: TranscriptV1 = {
     version: '1',
     video_id: 'test-video',
@@ -58,6 +73,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={mockEdl}
         onEdlChange={onEdlChange}
@@ -74,6 +90,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     const { container } = render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={mockEdl}
         onEdlChange={onEdlChange}
@@ -100,6 +117,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     const { container } = render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={mockEdl}
         onEdlChange={onEdlChange}
@@ -142,6 +160,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     const { container } = render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={edlWithRemoves}
         onEdlChange={onEdlChange}
@@ -176,6 +195,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={edlWithRemoves}
         onEdlChange={onEdlChange}
@@ -214,6 +234,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={edlWithRemoves}
         onEdlChange={onEdlChange}
@@ -232,6 +253,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={mockEdl}
         onEdlChange={onEdlChange}
@@ -246,6 +268,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={mockEdl}
         onEdlChange={onEdlChange}
@@ -276,6 +299,7 @@ describe('STEP 5 Gate: Transcript Editor', () => {
     const onEdlChange = vi.fn()
     render(
       <TranscriptEditor
+        {...defaultProps}
         transcript={mockTranscript}
         edl={edlWithRemoves}
         onEdlChange={onEdlChange}
