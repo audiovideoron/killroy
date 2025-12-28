@@ -8,6 +8,7 @@ import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
 import { getTranscriber } from './asr-adapter'
 import { renderFinal } from './final-render'
 import { buildEffectiveRemoveRanges } from './edl-engine'
+import { synthesizeVoiceTrack } from './tts/synthesis-pipeline'
 import {
   buildFullFilterChain,
   buildEQFilter,
@@ -568,6 +569,41 @@ ipcMain.handle('compute-pending-removals', async (_event, filePath: string, edl:
   } catch (err) {
     console.error('[compute-pending-removals] Error:', err)
     return { ranges: [], total_removed_ms: 0, duration_ms: 0 }
+  }
+})
+
+// Voice synthesis test - synthesize transcript and mux with video
+ipcMain.handle('synthesize-voice-test', async (_event, filePath: string, transcript: TranscriptV1, edl: EdlV1) => {
+  try {
+    console.log('[synthesize-voice-test] Starting synthesis...')
+
+    // 1. Extract video metadata
+    const videoAsset = await extractVideoMetadata(filePath)
+
+    // 2. Create work directory
+    const workDir = path.join(app.getPath('temp'), `synth-${Date.now()}`)
+
+    // 3. Run synthesis pipeline
+    const report = await synthesizeVoiceTrack(videoAsset, transcript, edl, workDir)
+
+    console.log('[synthesize-voice-test] Complete:', report)
+
+    return {
+      success: true,
+      outputPath: report.outputPath,
+      report: {
+        chunks: report.chunks,
+        total_target_ms: report.total_target_ms,
+        total_synth_ms: report.total_synth_ms,
+        tempo_adjustments: report.tempo_adjustments
+      }
+    }
+  } catch (err) {
+    console.error('[synthesize-voice-test] Error:', err)
+    return {
+      success: false,
+      error: String(err)
+    }
   }
 })
 

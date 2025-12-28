@@ -14,6 +14,7 @@ interface TranscriptPaneProps {
   onEdlChange: (newEdl: EdlV1) => void
   onExport: () => void
   onLoadTranscript: () => void
+  onSynthesisComplete?: (videoUrl: string) => void
 }
 
 export function TranscriptPane({
@@ -28,7 +29,8 @@ export function TranscriptPane({
   exportSuccess,
   onEdlChange,
   onExport,
-  onLoadTranscript
+  onLoadTranscript,
+  onSynthesisComplete
 }: TranscriptPaneProps) {
   if (!filePath) {
     return (
@@ -63,6 +65,7 @@ export function TranscriptPane({
             isExporting={isExporting}
             exportError={exportError}
             exportSuccess={exportSuccess}
+            onSynthesisComplete={onSynthesisComplete}
           />
         )}
       </>
@@ -99,6 +102,7 @@ export function TranscriptPane({
         isExporting={isExporting}
         exportError={exportError}
         exportSuccess={exportSuccess}
+        onSynthesisComplete={onSynthesisComplete}
       />
     )
   }

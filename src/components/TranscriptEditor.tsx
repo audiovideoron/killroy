@@ -21,6 +21,13 @@ function formatMs(ms: number): string {
   return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`
 }
 
+interface SynthesisReport {
+  chunks: number
+  total_target_ms: number
+  total_synth_ms: number
+  tempo_adjustments: number
+}
+
 interface TranscriptEditorProps {
   filePath: string
   transcript: TranscriptV1
@@ -30,11 +37,15 @@ interface TranscriptEditorProps {
   isExporting: boolean
   exportError: string | null
   exportSuccess: string | null
+  onSynthesisComplete?: (videoUrl: string) => void
 }
 
-export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess }: TranscriptEditorProps) {
+export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess, onSynthesisComplete }: TranscriptEditorProps) {
   const [selectedTokenIds, setSelectedTokenIds] = useState<Set<string>>(new Set())
   const [pendingRemovals, setPendingRemovals] = useState<PendingRemovalsResult | null>(null)
+  const [isSynthesizing, setIsSynthesizing] = useState(false)
+  const [synthesisError, setSynthesisError] = useState<string | null>(null)
+  const [synthesisReport, setSynthesisReport] = useState<SynthesisReport | null>(null)
 
   // Compute pending removals when edl changes
   useEffect(() => {
@@ -132,6 +143,30 @@ export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExp
     setSelectedTokenIds(new Set())
   }, [edl, onEdlChange])
 
+  // Synthesize voice
+  const synthesizeVoice = useCallback(async () => {
+    setIsSynthesizing(true)
+    setSynthesisError(null)
+    setSynthesisReport(null)
+
+    try {
+      const result = await window.electronAPI.synthesizeVoiceTest(filePath, transcript, edl)
+
+      if (result.success && result.outputPath) {
+        setSynthesisReport(result.report || null)
+        // Get file URL and notify parent to load it
+        const videoUrl = await window.electronAPI.getFileUrl(result.outputPath)
+        onSynthesisComplete?.(videoUrl)
+      } else {
+        setSynthesisError(result.error || 'Synthesis failed')
+      }
+    } catch (err) {
+      setSynthesisError(String(err))
+    } finally {
+      setIsSynthesizing(false)
+    }
+  }, [filePath, transcript, edl, onSynthesisComplete])
+
   return (
     <div className="transcript-editor">
       <div className="transcript-controls">
@@ -160,6 +195,18 @@ export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExp
         >
           {isExporting ? 'Exporting...' : 'Export Edited Video'}
         </button>
+        <button
+          onClick={synthesizeVoice}
+          disabled={isSynthesizing}
+          style={{
+            background: '#ab47bc',
+            color: '#fff',
+            fontWeight: 600,
+            border: '1px solid #333'
+          }}
+        >
+          {isSynthesizing ? 'Synthesizing...' : 'Synthesize Voice (Test)'}
+        </button>
       </div>
 
       {exportSuccess && (
@@ -183,6 +230,32 @@ export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExp
           marginBottom: 16
         }}>
           Export failed: {exportError}
+        </div>
+      )}
+
+      {/* Synthesis Status */}
+      {synthesisReport && (
+        <div style={{
+          padding: '12px',
+          background: '#7b1fa2',
+          color: 'white',
+          borderRadius: 4,
+          marginBottom: 16
+        }}>
+          ✓ Synthesis complete: {synthesisReport.chunks} chunks, {formatMs(synthesisReport.total_synth_ms)} synthesized → {formatMs(synthesisReport.total_target_ms)} target
+          {synthesisReport.tempo_adjustments > 0 && ` (${synthesisReport.tempo_adjustments} tempo adjustments)`}
+        </div>
+      )}
+
+      {synthesisError && (
+        <div style={{
+          padding: '12px',
+          background: '#f44',
+          color: 'white',
+          borderRadius: 4,
+          marginBottom: 16
+        }}>
+          Synthesis failed: {synthesisError}
         </div>
       )}
 

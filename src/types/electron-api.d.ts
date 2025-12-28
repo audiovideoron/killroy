@@ -40,6 +40,7 @@ declare global {
       cancelRender: (jobId: string) => Promise<{ cancelled: boolean; message: string }>
       detectQuietCandidates: (filePath: string) => Promise<any>
       computePendingRemovals: (filePath: string, edl: any) => Promise<{ ranges: Array<{ start_ms: number; end_ms: number }>; total_removed_ms: number; duration_ms: number }>
+      synthesizeVoiceTest: (filePath: string, transcript: any, edl: any) => Promise<{ success: boolean; outputPath?: string; error?: string; report?: { chunks: number; total_target_ms: number; total_synth_ms: number; tempo_adjustments: number } }>
     }
   }
 }

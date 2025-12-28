@@ -385,6 +385,12 @@ function App() {
     }
   }
 
+  // Handle synthesis completion - load synthesized video into player
+  const handleSynthesisComplete = useCallback((videoUrl: string) => {
+    console.log('[handleSynthesisComplete] Loading synthesized video:', videoUrl)
+    videoPreviewRef.current?.playUrl(videoUrl)
+  }, [])
+
   // Build status text for App-level status (non-job-progress states)
   const statusText = !currentJob ? {
     idle: 'Idle - Select a file and render preview',
@@ -467,6 +473,7 @@ function App() {
             onEdlChange={handleEdlChange}
             onExport={handleExport}
             onLoadTranscript={loadTranscript}
+            onSynthesisComplete={handleSynthesisComplete}
           />
         </div>
       </div>

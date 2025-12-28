@@ -56,5 +56,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('detect-quiet-candidates', filePath),
 
   computePendingRemovals: (filePath: string, edl: EdlV1): Promise<{ ranges: Array<{ start_ms: number; end_ms: number }>; total_removed_ms: number; duration_ms: number }> =>
-    ipcRenderer.invoke('compute-pending-removals', filePath, edl)
+    ipcRenderer.invoke('compute-pending-removals', filePath, edl),
+
+  synthesizeVoiceTest: (filePath: string, transcript: TranscriptV1, edl: EdlV1): Promise<{ success: boolean; outputPath?: string; error?: string; report?: { chunks: number; total_target_ms: number; total_synth_ms: number; tempo_adjustments: number } }> =>
+    ipcRenderer.invoke('synthesize-voice-test', filePath, transcript, edl)
 })

@@ -147,3 +147,64 @@ export async function extractVideoMetadata(filePath: string): Promise<VideoAsset
 
   return Promise.race([metadataPromise, timeoutPromise])
 }
+
+/**
+ * Probe audio file duration using ffprobe
+ * Returns duration in milliseconds
+ */
+export async function probeAudioDuration(filePath: string): Promise<number> {
+  const TIMEOUT_MS = 10000
+
+  let proc: ReturnType<typeof spawn> | null = null
+
+  const probePromise = new Promise<number>((resolve, reject) => {
+    const args = [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'json',
+      filePath
+    ]
+
+    proc = spawn('ffprobe', args)
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString()
+    })
+
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        return reject(new Error(`ffprobe exited with code ${code}: ${stderr}`))
+      }
+
+      try {
+        const output = JSON.parse(stdout)
+        const durationStr = output.format?.duration || '0'
+        const duration_ms = Math.round(parseFloat(durationStr) * 1000)
+        resolve(duration_ms)
+      } catch (error) {
+        reject(new Error(`Failed to parse ffprobe output: ${error}`))
+      }
+    })
+
+    proc.on('error', (err) => {
+      reject(new Error(`Failed to spawn ffprobe: ${err.message}`))
+    })
+  })
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM')
+      }
+      reject(new Error(`ffprobe timed out after ${TIMEOUT_MS}ms`))
+    }, TIMEOUT_MS)
+  })
+
+  return Promise.race([probePromise, timeoutPromise])
+}
