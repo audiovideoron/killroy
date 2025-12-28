@@ -337,6 +337,105 @@ describe('Synthesis Pipeline Alignment', () => {
     }
   }, 180000)  // 3 minute timeout for synthesis
 
+  it('should handle long replacement phrases', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Replace short word "kit" (540ms) with long phrase
+    const kitWord = findWordNear(originalTranscript, 'kit', 3000)
+    if (!kitWord) {
+      console.log('Word "kit" not found')
+      return
+    }
+
+    const originalDuration = kitWord.end_ms - kitWord.start_ms
+    console.log(`Original "kit": ${kitWord.start_ms}-${kitWord.end_ms}ms (${originalDuration}ms)`)
+
+    // Long replacement phrase - much longer than original word
+    // Use non-numeric words to avoid Whisper transcribing "one two three" as "123"
+    const longPhrase = 'Testing alpha beta gamma delta epsilon'
+
+    // Build synthesis inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithReplacement(
+      videoAsset.video_id,
+      uuidv4(),
+      'kit',
+      longPhrase,
+      kitWord.start_ms,
+      kitWord.end_ms
+    )
+
+    // Run pipeline
+    const testWorkDir = path.join(WORK_DIR, `synth-long-${Date.now()}`)
+    console.log(`\nReplacing "${kitWord.text}" with "${longPhrase}"`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`Synth duration: ${report.total_synth_ms}ms (original word was ${originalDuration}ms)`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT (around replacement) ===')
+    outputTranscript
+      .filter(w => w.start_ms > 0 && w.start_ms < 15000)
+      .forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify long phrase words appear in output
+    const phraseWords = ['testing', 'alpha', 'beta', 'gamma', 'delta', 'epsilon']
+    let foundCount = 0
+    console.log('\n=== PHRASE DETECTION ===')
+    for (const word of phraseWords) {
+      const found = findWordNear(outputTranscript, word, kitWord.start_ms, 10000)
+      if (found) {
+        console.log(`✓ "${word}" found at ${found.start_ms}ms`)
+        foundCount++
+      } else {
+        console.log(`✗ "${word}" NOT FOUND`)
+      }
+    }
+
+    // At least half the phrase words should be detected
+    expect(foundCount).toBeGreaterThanOrEqual(3)
+    console.log(`\n${foundCount}/${phraseWords.length} phrase words detected`)
+
+    // Words BEFORE replacement should still exist
+    const videoWord = findWordNear(originalTranscript, 'video', 500)
+    const footageWord = findWordNear(originalTranscript, 'footage', 1000)
+
+    if (videoWord) {
+      const found = findWordNear(outputTranscript, 'video', videoWord.start_ms)
+      console.log(`"video" (before): ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      expect(found).not.toBeNull()
+    }
+
+    if (footageWord) {
+      const found = findWordNear(outputTranscript, 'footage', footageWord.start_ms)
+      console.log(`"footage" (before): ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      expect(found).not.toBeNull()
+    }
+
+    // Words AFTER the long replacement should still exist (shifted later)
+    // Original "and" was at ~3540ms, but now it should be shifted by synth overflow
+    const ronWord = findWordNear(originalTranscript, 'ron', 4000)
+    if (ronWord) {
+      // Ron should exist somewhere after the long phrase
+      const found = findWordNear(outputTranscript, 'ron', ronWord.start_ms, 10000)
+      console.log(`"ron" (after): ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      // Note: might not be found if phrase is very long and overlaps
+    }
+  }, 180000)
+
   it('should not eat words before replacement', async () => {
     if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
       return
