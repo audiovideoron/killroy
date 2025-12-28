@@ -912,3 +912,421 @@ describe('Remove Range Alignment', () => {
     }
   }, 180000)
 })
+
+// ============================================================================
+// Combined Remove + Replacement Tests
+// ============================================================================
+
+/**
+ * Build EDL with both removes and replacements
+ */
+function buildEdlWithRemovesAndReplacements(
+  videoId: string,
+  removes: Array<{ start_ms: number; end_ms: number }>,
+  replacements: Array<{
+    tokenId: string
+    originalText: string
+    replacementText: string
+    start_ms: number
+    end_ms: number
+  }>
+): EdlV1 {
+  const removeRanges: RemoveRange[] = removes.map(r => ({
+    range_id: uuidv4(),
+    start_ms: r.start_ms,
+    end_ms: r.end_ms,
+    source: 'user' as const,
+    reason: 'selection' as const
+  }))
+
+  const wordReplacements: WordReplacement[] = replacements.map(r => ({
+    replacement_id: uuidv4(),
+    token_id: r.tokenId,
+    original_text: r.originalText,
+    replacement_text: r.replacementText,
+    start_ms: r.start_ms,
+    end_ms: r.end_ms
+  }))
+
+  return {
+    version: '1',
+    video_id: videoId,
+    edl_version_id: uuidv4(),
+    created_at: new Date().toISOString(),
+    params: {
+      merge_threshold_ms: 200,
+      pre_roll_ms: 0,
+      post_roll_ms: 0,
+      audio_crossfade_ms: 0
+    },
+    remove_ranges: removeRanges,
+    replacements: wordReplacements
+  }
+}
+
+describe('Combined Remove + Replacement', () => {
+  beforeAll(() => {
+    if (!fs.existsSync(TEST_VIDEO)) {
+      throw new Error(`Test video not found: ${TEST_VIDEO}`)
+    }
+    if (!fs.existsSync(WORK_DIR)) {
+      fs.mkdirSync(WORK_DIR, { recursive: true })
+    }
+  })
+
+  it('should handle remove BEFORE replacement', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Remove "kit and ron" (3000-5000ms) - early in video
+    // Replace "other" with "different" (~17000ms) - later in video
+    const kitWord = findWordNear(originalTranscript, 'kit', 3000)
+    const ronWord = findWordNear(originalTranscript, 'ron', 4500)
+    const otherWord = findWordNear(originalTranscript, 'other', 17000)
+
+    if (!kitWord || !ronWord || !otherWord) {
+      console.log('Target words not found')
+      return
+    }
+
+    const removeRange = { start_ms: kitWord.start_ms, end_ms: ronWord.end_ms }
+    const removeDuration = removeRange.end_ms - removeRange.start_ms
+
+    console.log(`Remove: ${removeRange.start_ms}ms - ${removeRange.end_ms}ms ("kit and ron")`)
+    console.log(`Replace: "other" at ${otherWord.start_ms}ms with "different"`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemovesAndReplacements(
+      videoAsset.video_id,
+      [removeRange],
+      [{
+        tokenId: uuidv4(),
+        originalText: 'other',
+        replacementText: 'different',
+        start_ms: otherWord.start_ms,
+        end_ms: otherWord.end_ms
+      }]
+    )
+
+    // Run hybrid synthesis (handles both removes and replacements)
+    const testWorkDir = path.join(WORK_DIR, `combo-remove-before-${Date.now()}`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+    console.log(`Original duration: ${videoAsset.duration_ms}ms`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are GONE
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    for (const word of ['kit', 'ron']) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      console.log(`"${word}": ${found ? '✗ STILL PRESENT at ' + found.start_ms + 'ms' : '✓ removed'}`)
+      expect(found).toBeUndefined()
+    }
+
+    // Verify replacement word appears
+    console.log('\n=== CHECKING REPLACEMENT ===')
+    const differentWord = outputTranscript.find(w => w.text === 'different')
+    console.log(`"different": ${differentWord ? '✓ FOUND at ' + differentWord.start_ms + 'ms' : '✗ MISSING'}`)
+    expect(differentWord).toBeDefined()
+
+    // Verify "other" is replaced (should not appear at original position)
+    const otherInOutput = findWordNear(outputTranscript, 'other', otherWord.start_ms - removeDuration, 2000)
+    // Note: there might be another "other" elsewhere in the video
+    console.log(`"other" at replacement position: ${otherInOutput ? 'still present (unexpected)' : 'replaced'}`)
+
+    // Verify words before remove are preserved
+    console.log('\n=== CHECKING PRESERVED WORDS ===')
+    const videoWord = findWordNear(outputTranscript, 'video', 500, 2000)
+    console.log(`"video" (before remove): ${videoWord ? '✓ FOUND at ' + videoWord.start_ms + 'ms' : '✗ MISSING'}`)
+    expect(videoWord).not.toBeNull()
+
+    // Verify "the" before "different" is preserved
+    // Original "the" was at ~16500ms, after remove it should be ~16500 - removeDuration
+    const theWord = findWordNear(outputTranscript, 'the', 16500 - removeDuration, 3000)
+    console.log(`"the" (before replacement): ${theWord ? '✓ FOUND at ' + theWord.start_ms + 'ms' : '✗ MISSING'}`)
+  }, 180000)
+
+  it('should handle remove AFTER replacement', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Replace "kit" with "test word" (~3000ms) - early in video
+    // Remove "recording and" (~22000-24000ms) - later in video
+    const kitWord = findWordNear(originalTranscript, 'kit', 3000)
+    const recordingWord = findWordNear(originalTranscript, 'recording', 22500)
+    const andWord = findWordNear(originalTranscript, 'and', 23600)
+
+    if (!kitWord || !recordingWord || !andWord) {
+      console.log('Target words not found')
+      return
+    }
+
+    const removeRange = { start_ms: recordingWord.start_ms, end_ms: andWord.end_ms }
+
+    console.log(`Replace: "kit" at ${kitWord.start_ms}ms with "test word"`)
+    console.log(`Remove: ${removeRange.start_ms}ms - ${removeRange.end_ms}ms ("recording and")`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemovesAndReplacements(
+      videoAsset.video_id,
+      [removeRange],
+      [{
+        tokenId: uuidv4(),
+        originalText: 'kit',
+        replacementText: 'test word',
+        start_ms: kitWord.start_ms,
+        end_ms: kitWord.end_ms
+      }]
+    )
+
+    // Run hybrid synthesis
+    const testWorkDir = path.join(WORK_DIR, `combo-remove-after-${Date.now()}`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify replacement appears
+    console.log('\n=== CHECKING REPLACEMENT ===')
+    const testWord = outputTranscript.find(w => w.text === 'test')
+    const wordWord = outputTranscript.find(w => w.text === 'word')
+    console.log(`"test": ${testWord ? '✓ FOUND at ' + testWord.start_ms + 'ms' : '✗ MISSING'}`)
+    console.log(`"word": ${wordWord ? '✓ FOUND at ' + wordWord.start_ms + 'ms' : '✗ MISSING'}`)
+    expect(testWord).toBeDefined()
+
+    // Verify removed word is gone
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    const recordingInOutput = outputTranscript.find(w => w.text === 'recording')
+    console.log(`"recording": ${recordingInOutput ? '✗ STILL PRESENT at ' + recordingInOutput.start_ms + 'ms' : '✓ removed'}`)
+    expect(recordingInOutput).toBeUndefined()
+
+    // Verify words after remove still exist
+    console.log('\n=== CHECKING PRESERVED WORDS ===')
+    // "we'll" should exist after the removed section
+    const wellWord = outputTranscript.find(w => w.text === 'll' || w.text === 'we')
+    console.log(`"we/ll" (after remove): ${wellWord ? '✓ FOUND' : '✗ MISSING'}`)
+    expect(wellWord).toBeDefined()
+  }, 180000)
+
+  it('should handle adjacent remove and replacement', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Find adjacent words: "the other one"
+    // Remove "the" (~16500ms)
+    // Replace "other" with "different" (~16920ms)
+    const theWord = findWordNear(originalTranscript, 'the', 16500)
+    const otherWord = findWordNear(originalTranscript, 'other', 17000)
+
+    if (!theWord || !otherWord) {
+      console.log('Target words not found')
+      return
+    }
+
+    const removeRange = { start_ms: theWord.start_ms, end_ms: theWord.end_ms }
+
+    console.log(`Remove: "the" at ${theWord.start_ms}ms - ${theWord.end_ms}ms`)
+    console.log(`Replace: "other" at ${otherWord.start_ms}ms with "different"`)
+    console.log(`Gap between remove end and replacement start: ${otherWord.start_ms - theWord.end_ms}ms`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemovesAndReplacements(
+      videoAsset.video_id,
+      [removeRange],
+      [{
+        tokenId: uuidv4(),
+        originalText: 'other',
+        replacementText: 'different',
+        start_ms: otherWord.start_ms,
+        end_ms: otherWord.end_ms
+      }]
+    )
+
+    // Run hybrid synthesis
+    const testWorkDir = path.join(WORK_DIR, `combo-adjacent-${Date.now()}`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT (around edit point) ===')
+    outputTranscript
+      .filter(w => w.start_ms > 13000 && w.start_ms < 22000)
+      .forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify "the" at original position is removed
+    // But note: there are multiple "the" words in the transcript
+    console.log('\n=== CHECKING EDITS ===')
+
+    // Verify replacement word appears
+    const differentWord = outputTranscript.find(w => w.text === 'different')
+    console.log(`"different": ${differentWord ? '✓ FOUND at ' + differentWord.start_ms + 'ms' : '✗ MISSING'}`)
+    expect(differentWord).toBeDefined()
+
+    // Verify "one" after replacement is preserved
+    const oneWord = findWordNear(outputTranscript, 'one', 17000, 5000)
+    console.log(`"one" (after replacement): ${oneWord ? '✓ FOUND at ' + oneWord.start_ms + 'ms' : '✗ MISSING'}`)
+    expect(oneWord).not.toBeNull()
+
+    // Check relative order: "different" should come before "one"
+    if (differentWord && oneWord) {
+      const order = differentWord.start_ms < oneWord.start_ms
+      console.log(`Order check: "different" (${differentWord.start_ms}ms) before "one" (${oneWord.start_ms}ms): ${order ? '✓' : '✗'}`)
+      expect(order).toBe(true)
+    }
+  }, 180000)
+
+  it('should handle multiple removes and multiple replacements', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Complex scenario:
+    // Remove 1: "kit and ron" (~3000-5000ms)
+    // Replace 1: "setting" with "configuring" (~7000ms)
+    // Remove 2: "so we've got" (~11500-12200ms)
+    // Replace 2: "other" with "second" (~17000ms)
+
+    const kitWord = findWordNear(originalTranscript, 'kit', 3000)
+    const ronWord = findWordNear(originalTranscript, 'ron', 4500)
+    const settingWord = findWordNear(originalTranscript, 'setting', 7000)
+    const soWord = findWordNear(originalTranscript, 'so', 11600)
+    const gotWord = findWordNear(originalTranscript, 'got', 12200)
+    const otherWord = findWordNear(originalTranscript, 'other', 17000)
+
+    if (!kitWord || !ronWord || !settingWord || !soWord || !gotWord || !otherWord) {
+      console.log('Target words not found')
+      console.log({ kitWord, ronWord, settingWord, soWord, gotWord, otherWord })
+      return
+    }
+
+    const removes = [
+      { start_ms: kitWord.start_ms, end_ms: ronWord.end_ms },
+      { start_ms: soWord.start_ms, end_ms: gotWord.end_ms }
+    ]
+
+    const replacements = [
+      {
+        tokenId: uuidv4(),
+        originalText: 'setting',
+        replacementText: 'configuring',
+        start_ms: settingWord.start_ms,
+        end_ms: settingWord.end_ms
+      },
+      {
+        tokenId: uuidv4(),
+        originalText: 'other',
+        replacementText: 'second',
+        start_ms: otherWord.start_ms,
+        end_ms: otherWord.end_ms
+      }
+    ]
+
+    console.log('=== PLANNED EDITS ===')
+    console.log(`Remove 1: ${removes[0].start_ms}ms - ${removes[0].end_ms}ms ("kit and ron")`)
+    console.log(`Replace 1: "setting" at ${settingWord.start_ms}ms with "configuring"`)
+    console.log(`Remove 2: ${removes[1].start_ms}ms - ${removes[1].end_ms}ms ("so we've got")`)
+    console.log(`Replace 2: "other" at ${otherWord.start_ms}ms with "second"`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemovesAndReplacements(videoAsset.video_id, removes, replacements)
+
+    // Run hybrid synthesis
+    const testWorkDir = path.join(WORK_DIR, `combo-multi-${Date.now()}`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are gone
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    for (const word of ['kit', 'ron']) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      console.log(`"${word}": ${found ? '✗ STILL PRESENT' : '✓ removed'}`)
+      expect(found).toBeUndefined()
+    }
+
+    // Verify replacement words appear
+    console.log('\n=== CHECKING REPLACEMENTS ===')
+    // "configuring" might be split by Whisper
+    const configWord = outputTranscript.find(w =>
+      w.text === 'configuring' || w.text === 'config' || w.text.startsWith('configur')
+    )
+    console.log(`"configuring": ${configWord ? '✓ FOUND (' + configWord.text + ') at ' + configWord.start_ms + 'ms' : '✗ MISSING'}`)
+
+    const secondWord = outputTranscript.find(w => w.text === 'second')
+    console.log(`"second": ${secondWord ? '✓ FOUND at ' + secondWord.start_ms + 'ms' : '✗ MISSING'}`)
+
+    // At least one replacement should be found
+    expect(configWord || secondWord).toBeDefined()
+
+    // Verify preserved words
+    console.log('\n=== CHECKING PRESERVED WORDS ===')
+    const preservedChecks = ['video', 'footage', 'up', 'tests', 'two', 'screens']
+    for (const word of preservedChecks) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      console.log(`"${word}": ${found ? '✓ FOUND at ' + found.start_ms + 'ms' : '✗ MISSING'}`)
+    }
+  }, 180000)
+})
