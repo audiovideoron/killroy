@@ -99,6 +99,7 @@ function extractAudio(videoPath: string, outputPath: string): void {
 
 /**
  * Find a word in transcript, return its position or null
+ * If expectedMs is provided, finds the closest match to that position
  */
 function findWord(transcript: TranscriptWord[], word: string, afterMs?: number): TranscriptWord | null {
   const normalized = word.toLowerCase().replace(/[^a-z0-9]/g, '')
@@ -106,6 +107,31 @@ function findWord(transcript: TranscriptWord[], word: string, afterMs?: number):
     w.text === normalized &&
     (afterMs === undefined || w.start_ms > afterMs)
   ) || null
+}
+
+/**
+ * Find word closest to expected position (handles duplicate words)
+ */
+function findWordNear(transcript: TranscriptWord[], word: string, expectedMs: number, toleranceMs: number = 2000): TranscriptWord | null {
+  const normalized = word.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const candidates = transcript.filter(w => w.text === normalized)
+
+  if (candidates.length === 0) return null
+
+  // Find closest match to expected position
+  let closest = candidates[0]
+  let minDist = Math.abs(candidates[0].start_ms - expectedMs)
+
+  for (const c of candidates) {
+    const dist = Math.abs(c.start_ms - expectedMs)
+    if (dist < minDist) {
+      minDist = dist
+      closest = c
+    }
+  }
+
+  // Only return if within tolerance
+  return minDist <= toleranceMs ? closest : null
 }
 
 /**
@@ -435,6 +461,227 @@ describe('ASR Verification', () => {
       console.log(`Next word preserved: ${results.nextFound ? 'YES' : 'NO'}`)
     }, 120000)
   })
+})
+
+describe('Alignment Verification', () => {
+  const ALIGNMENT_TOLERANCE_MS = 200 // Words must be within 200ms of expected position
+
+  it('should preserve word timing when silencing a region', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    const audioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(audioPath)) {
+      extractAudio(TEST_VIDEO, audioPath)
+    }
+
+    // Get original transcript
+    const originalTranscript = await transcribeAudio(audioPath)
+
+    // Pick a word to silence (around 10 seconds)
+    const targetWord = originalTranscript.find(w => w.start_ms > 10000 && w.text.length > 2)
+    if (!targetWord) {
+      console.log('No suitable target word found')
+      return
+    }
+
+    console.log(`Silencing word "${targetWord.text}" at ${targetWord.start_ms}-${targetWord.end_ms}ms`)
+
+    // Silence just the target word
+    const silencedPath = path.join(WORK_DIR, 'alignment-silenced.wav')
+    silenceRegion(audioPath, silencedPath, targetWord.start_ms, targetWord.end_ms)
+
+    // Get transcript of silenced audio
+    const silencedTranscript = await transcribeAudio(silencedPath)
+
+    // Check alignment of words BEFORE the silenced region
+    const wordsBefore = originalTranscript.filter(w => w.end_ms < targetWord.start_ms && w.text.length > 0)
+
+    console.log('\n=== ALIGNMENT CHECK (words before silence) ===')
+    let alignmentErrors = 0
+    for (const originalWord of wordsBefore.slice(-5)) { // Check last 5 words before silence
+      const matchingWord = findWordNear(silencedTranscript, originalWord.text, originalWord.start_ms)
+      if (matchingWord) {
+        const drift = Math.abs(matchingWord.start_ms - originalWord.start_ms)
+        const status = drift <= ALIGNMENT_TOLERANCE_MS ? '✓' : '✗'
+        console.log(`${status} "${originalWord.text}": expected ${originalWord.start_ms}ms, got ${matchingWord.start_ms}ms (drift: ${drift}ms)`)
+        if (drift > ALIGNMENT_TOLERANCE_MS) {
+          alignmentErrors++
+        }
+      } else {
+        console.log(`✗ "${originalWord.text}": NOT FOUND near ${originalWord.start_ms}ms`)
+        alignmentErrors++
+      }
+    }
+
+    // Check alignment of words AFTER the silenced region
+    const wordsAfter = originalTranscript.filter(w => w.start_ms > targetWord.end_ms && w.text.length > 0)
+
+    console.log('\n=== ALIGNMENT CHECK (words after silence) ===')
+    for (const originalWord of wordsAfter.slice(0, 5)) { // Check first 5 words after silence
+      const matchingWord = findWordNear(silencedTranscript, originalWord.text, originalWord.start_ms)
+      if (matchingWord) {
+        const drift = Math.abs(matchingWord.start_ms - originalWord.start_ms)
+        const status = drift <= ALIGNMENT_TOLERANCE_MS ? '✓' : '✗'
+        console.log(`${status} "${originalWord.text}": expected ${originalWord.start_ms}ms, got ${matchingWord.start_ms}ms (drift: ${drift}ms)`)
+        if (drift > ALIGNMENT_TOLERANCE_MS) {
+          alignmentErrors++
+        }
+      } else {
+        console.log(`✗ "${originalWord.text}": NOT FOUND near ${originalWord.start_ms}ms`)
+        alignmentErrors++
+      }
+    }
+
+    console.log(`\nAlignment errors: ${alignmentErrors}`)
+    // Allow 1 error due to ASR variability (some words may be detected at slightly different positions)
+    expect(alignmentErrors).toBeLessThanOrEqual(1)
+  }, 60000)
+
+  it('should maintain expected timing after replacement insertion', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    const audioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(audioPath)) {
+      extractAudio(TEST_VIDEO, audioPath)
+    }
+
+    // Get original transcript
+    const originalTranscript = await transcribeAudio(audioPath)
+
+    // Find "the other one" sequence around 16-18 seconds
+    const theWord = findWord(originalTranscript, 'the', 16000)
+    const otherWord = findWord(originalTranscript, 'other', 16000)
+    const oneWord = findWord(originalTranscript, 'one', 17000)
+
+    if (!theWord || !otherWord || !oneWord) {
+      console.log('Could not find test sequence')
+      return
+    }
+
+    console.log(`Original positions:`)
+    console.log(`  "the": ${theWord.start_ms}-${theWord.end_ms}ms`)
+    console.log(`  "other": ${otherWord.start_ms}-${otherWord.end_ms}ms`)
+    console.log(`  "one": ${oneWord.start_ms}-${oneWord.end_ms}ms`)
+
+    // Replace "other" with a short word
+    const replacementText = 'new'
+    const patchPath = path.join(WORK_DIR, 'alignment-patch.wav')
+    generateSpeech(replacementText, patchPath)
+
+    // Get patch duration
+    const patchDuration = parseInt(execSync(
+      `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${patchPath}"`
+    ).toString().trim()) * 1000 || 500
+
+    console.log(`Patch "${replacementText}" duration: ~${patchDuration}ms`)
+
+    // Silence original word region
+    const silencedPath = path.join(WORK_DIR, 'alignment-replace-silenced.wav')
+    silenceRegion(audioPath, silencedPath, otherWord.start_ms, otherWord.end_ms)
+
+    // Insert replacement at word position
+    const finalPath = path.join(WORK_DIR, 'alignment-replaced.wav')
+    overlayAudio(silencedPath, patchPath, finalPath, otherWord.start_ms)
+
+    // Transcribe result
+    const finalTranscript = await transcribeAudio(finalPath)
+
+    console.log('\n=== ALIGNMENT AFTER REPLACEMENT ===')
+
+    // Check "the" alignment (should be unchanged)
+    const theAfter = findWord(finalTranscript, 'the', theWord.start_ms - 1000)
+    if (theAfter) {
+      const drift = Math.abs(theAfter.start_ms - theWord.start_ms)
+      console.log(`"the": expected ${theWord.start_ms}ms, got ${theAfter.start_ms}ms (drift: ${drift}ms)`)
+      expect(drift).toBeLessThan(ALIGNMENT_TOLERANCE_MS)
+    } else {
+      console.log(`"the": NOT FOUND`)
+      expect(theAfter).not.toBeNull()
+    }
+
+    // Check replacement is at expected position
+    const replAfter = findWord(finalTranscript, replacementText)
+    if (replAfter) {
+      const expectedPos = otherWord.start_ms
+      const drift = Math.abs(replAfter.start_ms - expectedPos)
+      console.log(`"${replacementText}": expected ~${expectedPos}ms, got ${replAfter.start_ms}ms (drift: ${drift}ms)`)
+      expect(drift).toBeLessThan(500) // Wider tolerance for replacement
+    } else {
+      console.log(`"${replacementText}": NOT FOUND`)
+    }
+
+    // Check "one" alignment
+    // Expected position: original position (replacement is in place, not shifting timeline)
+    const oneAfter = findWord(finalTranscript, 'one', oneWord.start_ms - 2000)
+    if (oneAfter) {
+      const drift = Math.abs(oneAfter.start_ms - oneWord.start_ms)
+      console.log(`"one": expected ${oneWord.start_ms}ms, got ${oneAfter.start_ms}ms (drift: ${drift}ms)`)
+      expect(drift).toBeLessThan(ALIGNMENT_TOLERANCE_MS)
+    } else {
+      console.log(`"one": NOT FOUND`)
+    }
+  }, 60000)
+
+  it('should report drift for all words in output', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    const audioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(audioPath)) {
+      extractAudio(TEST_VIDEO, audioPath)
+    }
+
+    // Get original transcript
+    const originalTranscript = await transcribeAudio(audioPath)
+
+    // Silence a word in the middle
+    const targetWord = originalTranscript.find(w => w.start_ms > 12000 && w.start_ms < 14000 && w.text.length > 2)
+    if (!targetWord) {
+      console.log('No suitable target word found')
+      return
+    }
+
+    const silencedPath = path.join(WORK_DIR, 'drift-test.wav')
+    silenceRegion(audioPath, silencedPath, targetWord.start_ms, targetWord.end_ms)
+
+    const silencedTranscript = await transcribeAudio(silencedPath)
+
+    // Calculate drift for all matching words
+    console.log('\n=== FULL DRIFT REPORT ===')
+    console.log(`Target silenced: "${targetWord.text}" at ${targetWord.start_ms}ms`)
+    console.log('')
+
+    const drifts: number[] = []
+    for (const orig of originalTranscript) {
+      if (orig.text.length === 0 || orig.text === targetWord.text) continue
+
+      // Use proximity matching to handle duplicate words
+      const match = findWordNear(silencedTranscript, orig.text, orig.start_ms)
+      if (match) {
+        const drift = match.start_ms - orig.start_ms
+        drifts.push(Math.abs(drift))
+        const marker = Math.abs(drift) > ALIGNMENT_TOLERANCE_MS ? ' ⚠️' : ''
+        console.log(`${orig.start_ms}ms "${orig.text}": drift ${drift > 0 ? '+' : ''}${drift}ms${marker}`)
+      }
+    }
+
+    if (drifts.length > 0) {
+      const avgDrift = drifts.reduce((a, b) => a + b, 0) / drifts.length
+      const maxDrift = Math.max(...drifts)
+      console.log(`\nAverage drift: ${avgDrift.toFixed(0)}ms`)
+      console.log(`Max drift: ${maxDrift}ms`)
+      console.log(`Words within tolerance: ${drifts.filter(d => d <= ALIGNMENT_TOLERANCE_MS).length}/${drifts.length}`)
+
+      // At least 75% of words should be within tolerance (allows for ASR variability)
+      const percentInTolerance = drifts.filter(d => d <= ALIGNMENT_TOLERANCE_MS).length / drifts.length
+      expect(percentInTolerance).toBeGreaterThanOrEqual(0.75)
+    }
+  }, 60000)
 })
 
 describe('Test Utilities', () => {
