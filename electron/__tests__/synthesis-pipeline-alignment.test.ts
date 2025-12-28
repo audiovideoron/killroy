@@ -14,8 +14,8 @@ import { execSync, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { v4 as uuidv4 } from 'uuid'
-import { synthesizeHybridTrack } from '../tts/synthesis-pipeline'
-import type { VideoAsset, EdlV1, WordReplacement } from '../../shared/editor-types'
+import { synthesizeHybridTrack, renderDeleteOnlyPreview } from '../tts/synthesis-pipeline'
+import type { VideoAsset, EdlV1, WordReplacement, RemoveRange } from '../../shared/editor-types'
 
 const TEST_VIDEO = path.resolve('media/IMG_0061-30sec.MOV')
 const WORK_DIR = '/tmp/synthesis-alignment-test'
@@ -186,6 +186,47 @@ function buildEdlWithReplacement(
     remove_ranges: [],
     replacements: [replacement]
   }
+}
+
+/**
+ * Build EDL with remove ranges (deletions)
+ */
+function buildEdlWithRemoves(
+  videoId: string,
+  removes: Array<{ start_ms: number; end_ms: number }>
+): EdlV1 {
+  const removeRanges: RemoveRange[] = removes.map((r, i) => ({
+    range_id: uuidv4(),
+    start_ms: r.start_ms,
+    end_ms: r.end_ms,
+    source: 'user' as const,
+    reason: 'selection' as const
+  }))
+
+  return {
+    version: '1',
+    video_id: videoId,
+    edl_version_id: uuidv4(),
+    created_at: new Date().toISOString(),
+    params: {
+      merge_threshold_ms: 200,
+      pre_roll_ms: 0,
+      post_roll_ms: 0,
+      audio_crossfade_ms: 0
+    },
+    remove_ranges: removeRanges,
+    replacements: []
+  }
+}
+
+/**
+ * Get output video duration in ms
+ */
+function getOutputDuration(videoPath: string): number {
+  const result = execSync(
+    `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`
+  ).toString().trim()
+  return Math.round(parseFloat(result) * 1000)
 }
 
 describe('Synthesis Pipeline Alignment', () => {
@@ -521,6 +562,353 @@ describe('Synthesis Pipeline Alignment', () => {
       } else {
         console.log(`"and" (after): MISSING near ${andWord.start_ms}ms`)
       }
+    }
+  }, 180000)
+})
+
+// ============================================================================
+// Remove Range Tests (Deletions)
+// ============================================================================
+
+describe('Remove Range Alignment', () => {
+  beforeAll(() => {
+    if (!fs.existsSync(TEST_VIDEO)) {
+      throw new Error(`Test video not found: ${TEST_VIDEO}`)
+    }
+    if (!fs.existsSync(WORK_DIR)) {
+      fs.mkdirSync(WORK_DIR, { recursive: true })
+    }
+  })
+
+  it('should remove a single range from middle of video', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    console.log('=== ORIGINAL TRANSCRIPT ===')
+    originalTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Find words to target for removal
+    // Remove "setting up flicker tests" (approx 6800ms - 9500ms)
+    const settingWord = findWordNear(originalTranscript, 'setting', 7000)
+    const testsWord = findWordNear(originalTranscript, 'tests', 9000)
+
+    if (!settingWord || !testsWord) {
+      console.log('Target words not found')
+      return
+    }
+
+    const removeStart = settingWord.start_ms
+    const removeEnd = testsWord.end_ms
+    const removeDuration = removeEnd - removeStart
+
+    console.log(`\nRemoving: ${removeStart}ms - ${removeEnd}ms (${removeDuration}ms)`)
+    console.log(`This should remove: "setting up flicker tests"`)
+
+    // Find words before and after remove range
+    const beforeWord = findWordNear(originalTranscript, 'are', 6000)
+    const afterWord = findWordNear(originalTranscript, 'in', 10000)
+
+    console.log(`Before remove: "${beforeWord?.text}" at ${beforeWord?.start_ms}ms`)
+    console.log(`After remove: "${afterWord?.text}" at ${afterWord?.start_ms}ms`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemoves(videoAsset.video_id, [
+      { start_ms: removeStart, end_ms: removeEnd }
+    ])
+
+    // Run delete-only preview
+    const testWorkDir = path.join(WORK_DIR, `remove-single-${Date.now()}`)
+    const report = await renderDeleteOnlyPreview(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+    console.log(`Original duration: ${report.original_duration_ms}ms`)
+    console.log(`Edited duration: ${report.edited_duration_ms}ms`)
+    console.log(`Expected reduction: ${removeDuration}ms`)
+    console.log(`Actual reduction: ${report.original_duration_ms - report.edited_duration_ms}ms`)
+
+    // Verify duration reduced
+    const durationReduction = report.original_duration_ms - report.edited_duration_ms
+    expect(durationReduction).toBeGreaterThan(removeDuration * 0.8) // Allow 20% tolerance
+    expect(durationReduction).toBeLessThan(removeDuration * 1.2)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are GONE
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    const removedWords = ['setting', 'up', 'flicker', 'tests']
+    for (const word of removedWords) {
+      // Search anywhere in transcript (wide tolerance since positions shifted)
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      if (found) {
+        console.log(`✗ "${word}" still present at ${found.start_ms}ms`)
+      } else {
+        console.log(`✓ "${word}" removed`)
+      }
+      // These words should NOT be in output
+      expect(found).toBeUndefined()
+    }
+
+    // Verify words BEFORE remove are preserved
+    console.log('\n=== CHECKING PRESERVED WORDS (before) ===')
+    if (beforeWord) {
+      const found = findWordNear(outputTranscript, 'are', beforeWord.start_ms, 3000)
+      console.log(`"are": ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      expect(found).not.toBeNull()
+    }
+
+    // Verify words AFTER remove are preserved (but shifted earlier)
+    console.log('\n=== CHECKING PRESERVED WORDS (after, shifted) ===')
+    if (afterWord) {
+      // "in" should now appear earlier by ~removeDuration
+      const expectedNewPosition = afterWord.start_ms - removeDuration
+      const found = findWordNear(outputTranscript, 'in', expectedNewPosition, 3000)
+      if (found) {
+        console.log(`"in": expected ~${expectedNewPosition}ms, found at ${found.start_ms}ms`)
+      } else {
+        // Try finding it anywhere
+        const anywhere = outputTranscript.find(w => w.text === 'in')
+        console.log(`"in": not at expected position, found at ${anywhere?.start_ms}ms`)
+      }
+      expect(found).not.toBeNull()
+    }
+  }, 180000)
+
+  it('should remove multiple ranges', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Remove two separate ranges:
+    // 1. "kit and ron" (3000-5000ms)
+    // 2. "setting up" (6800-8000ms)
+    const kitWord = findWordNear(originalTranscript, 'kit', 3000)
+    const ronWord = findWordNear(originalTranscript, 'ron', 4500)
+    const settingWord = findWordNear(originalTranscript, 'setting', 7000)
+    const upWord = findWordNear(originalTranscript, 'up', 7500)
+
+    if (!kitWord || !ronWord || !settingWord || !upWord) {
+      console.log('Target words not found')
+      return
+    }
+
+    const remove1 = { start_ms: kitWord.start_ms, end_ms: ronWord.end_ms }
+    const remove2 = { start_ms: settingWord.start_ms, end_ms: upWord.end_ms }
+    const totalRemoved = (remove1.end_ms - remove1.start_ms) + (remove2.end_ms - remove2.start_ms)
+
+    console.log(`Remove 1: ${remove1.start_ms}ms - ${remove1.end_ms}ms ("kit and ron")`)
+    console.log(`Remove 2: ${remove2.start_ms}ms - ${remove2.end_ms}ms ("setting up")`)
+    console.log(`Total to remove: ${totalRemoved}ms`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemoves(videoAsset.video_id, [remove1, remove2])
+
+    // Run delete-only preview
+    const testWorkDir = path.join(WORK_DIR, `remove-multi-${Date.now()}`)
+    const report = await renderDeleteOnlyPreview(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOriginal duration: ${report.original_duration_ms}ms`)
+    console.log(`Edited duration: ${report.edited_duration_ms}ms`)
+    console.log(`Reduction: ${report.original_duration_ms - report.edited_duration_ms}ms`)
+
+    // Verify duration reduced
+    const durationReduction = report.original_duration_ms - report.edited_duration_ms
+    expect(durationReduction).toBeGreaterThan(totalRemoved * 0.7)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are GONE
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    const removedWords1 = ['kit', 'ron']
+    const removedWords2 = ['setting', 'up']
+
+    for (const word of [...removedWords1, ...removedWords2]) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      if (found) {
+        console.log(`✗ "${word}" still present at ${found.start_ms}ms`)
+      } else {
+        console.log(`✓ "${word}" removed`)
+      }
+      expect(found).toBeUndefined()
+    }
+
+    // Verify preserved words still exist
+    console.log('\n=== CHECKING PRESERVED WORDS ===')
+    // Note: Whisper sometimes splits "flicker" into "flick" + "er"
+    const preservedWords = ['video', 'footage', 'we', 'flick', 'tests']
+    for (const word of preservedWords) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      console.log(`"${word}": ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      expect(found).toBeDefined()
+    }
+  }, 180000)
+
+  it('should remove range at video start', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Remove from start through "footage" (0 - ~2000ms)
+    const footageWord = findWordNear(originalTranscript, 'footage', 1500)
+    if (!footageWord) {
+      console.log('"footage" not found')
+      return
+    }
+
+    const removeEnd = footageWord.end_ms
+    console.log(`Removing: 0ms - ${removeEnd}ms (start of video through "footage")`)
+
+    // Build inputs
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemoves(videoAsset.video_id, [
+      { start_ms: 0, end_ms: removeEnd }
+    ])
+
+    // Run delete-only preview
+    const testWorkDir = path.join(WORK_DIR, `remove-start-${Date.now()}`)
+    const report = await renderDeleteOnlyPreview(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOriginal duration: ${report.original_duration_ms}ms`)
+    console.log(`Edited duration: ${report.edited_duration_ms}ms`)
+    console.log(`Removed: ${removeEnd}ms from start`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are GONE
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    const removedWords = ['some', 'video', 'footage']
+    for (const word of removedWords) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      if (found) {
+        console.log(`✗ "${word}" still present at ${found.start_ms}ms`)
+      } else {
+        console.log(`✓ "${word}" removed`)
+      }
+      expect(found).toBeUndefined()
+    }
+
+    // First word in output should be "kit" (or close to start)
+    const firstWord = outputTranscript.find(w => w.text.length > 0)
+    console.log(`\nFirst word in output: "${firstWord?.text}" at ${firstWord?.start_ms}ms`)
+    // Should start near 0ms now
+    expect(firstWord?.start_ms).toBeLessThan(1000)
+
+    // "kit" should now be near the start
+    const kitWord = findWordNear(outputTranscript, 'kit', 500, 2000)
+    console.log(`"kit": ${kitWord ? 'FOUND at ' + kitWord.start_ms + 'ms' : 'MISSING'}`)
+    expect(kitWord).not.toBeNull()
+  }, 180000)
+
+  it('should remove range at video end', async () => {
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    // Get original transcript
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Find a word near the end to remove from
+    // Remove last ~5 seconds: "something will happen"
+    const somethingWord = findWordNear(originalTranscript, 'something', 29000)
+    if (!somethingWord) {
+      console.log('"something" not found')
+      return
+    }
+
+    const videoAsset = buildVideoAsset()
+    const removeStart = somethingWord.start_ms
+
+    console.log(`Removing: ${removeStart}ms - ${videoAsset.duration_ms}ms (end of video)`)
+
+    // Build inputs
+    const edl = buildEdlWithRemoves(videoAsset.video_id, [
+      { start_ms: removeStart, end_ms: videoAsset.duration_ms }
+    ])
+
+    // Run delete-only preview
+    const testWorkDir = path.join(WORK_DIR, `remove-end-${Date.now()}`)
+    const report = await renderDeleteOnlyPreview(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOriginal duration: ${report.original_duration_ms}ms`)
+    console.log(`Edited duration: ${report.edited_duration_ms}ms`)
+    console.log(`Removed: ${videoAsset.duration_ms - removeStart}ms from end`)
+
+    // Verify output is shorter
+    expect(report.edited_duration_ms).toBeLessThan(removeStart + 1000)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT ===')
+    outputTranscript.forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // Verify removed words are GONE
+    console.log('\n=== CHECKING REMOVED WORDS ===')
+    const removedWords = ['something', 'will', 'happen']
+    for (const word of removedWords) {
+      const found = outputTranscript.find(w => w.text === word.toLowerCase())
+      if (found) {
+        console.log(`✗ "${word}" still present at ${found.start_ms}ms`)
+      } else {
+        console.log(`✓ "${word}" removed`)
+      }
+      expect(found).toBeUndefined()
+    }
+
+    // Words before removed section should still exist
+    console.log('\n=== CHECKING PRESERVED WORDS ===')
+    const hopefullyWord = findWordNear(originalTranscript, 'hopefully', 28500)
+    if (hopefullyWord) {
+      const found = findWordNear(outputTranscript, 'hopefully', hopefullyWord.start_ms, 3000)
+      console.log(`"hopefully": ${found ? 'FOUND at ' + found.start_ms + 'ms' : 'MISSING'}`)
+      expect(found).not.toBeNull()
     }
   }, 180000)
 })
