@@ -62,6 +62,13 @@ function createWindow() {
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
+    // Security: Only allow localhost URLs in dev mode to prevent arbitrary URL loading
+    const devUrl = new URL(process.env.VITE_DEV_SERVER_URL)
+    if (devUrl.hostname !== 'localhost' && devUrl.hostname !== '127.0.0.1') {
+      console.error('[security] DEV_SERVER_URL must be localhost, got:', devUrl.hostname)
+      app.quit()
+      return
+    }
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
     mainWindow.webContents.openDevTools()
   } else {
@@ -128,6 +135,11 @@ app.on('will-quit', () => {
     console.error('[cleanup] Failed to clean FFmpeg jobs:', err)
   }
 
+  // Clean up synthesized audio/preview caches to prevent memory leaks
+  synthesizedAudioCache.clear()
+  synthesizedPreviewCache.clear()
+  console.log('[cleanup] Cleared synthesized audio/preview caches')
+
   // Note: Temp directories are now cleaned up via cleanupStaleJobDirs() on startup
   // and cleanupJobTempDir() after each job completes
 })
@@ -145,6 +157,12 @@ ipcMain.handle('select-file', async () => {
     return null
   }
   const selectedPath = result.filePaths[0]
+  // Validate path before approving for protocol access
+  const validation = validateMediaPath(selectedPath)
+  if (!validation.ok) {
+    console.error('[select-file] Validation failed:', validation.message)
+    return null
+  }
   // Approve user-selected file for appfile:// protocol access
   approveFilePath(selectedPath)
   return selectedPath
