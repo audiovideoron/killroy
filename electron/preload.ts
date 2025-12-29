@@ -64,5 +64,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('synthesize-voice-test', filePath, transcript, edl),
 
   cloneVoice: (filePath: string): Promise<{ success: boolean; voice_id?: string; voice_name?: string; error?: string }> =>
-    ipcRenderer.invoke('clone-voice', filePath)
+    ipcRenderer.invoke('clone-voice', filePath),
+
+  cancelRender: (jobId: string): Promise<{ success: boolean; message: string }> =>
+    ipcRenderer.invoke('cancel-render', jobId)
 })
