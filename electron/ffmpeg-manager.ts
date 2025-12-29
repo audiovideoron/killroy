@@ -580,8 +580,18 @@ export function buildLoudnessFilter(loudness: LoudnessParams): string {
 /**
  * Build Noise Sampling DSP filter using noiseSampleRegion.
  *
- * Toggle-only semantics:
- * - If enabled AND region exists: apply afftdn with fixed conservative settings
+ * The region's duration is used to tune the anlmdn filter's analysis window:
+ * - Shorter regions (< 500ms): Use smaller patch/research sizes for faster adaptation
+ * - Medium regions (500ms - 2s): Balanced settings for typical noise samples
+ * - Longer regions (> 2s): Larger windows for more thorough noise profiling
+ *
+ * Uses anlmdn (Adaptive Non-Local Means Denoiser) instead of afftdn:
+ * - More modern algorithm with better quality
+ * - Parameters can be meaningfully tuned by sample duration
+ * - Better for speech content (less artifact introduction)
+ *
+ * Toggle semantics:
+ * - If enabled AND region exists: apply anlmdn with region-tuned settings
  * - If disabled OR no region: explicit bypass (return empty string)
  *
  * This ensures:
@@ -591,7 +601,7 @@ export function buildLoudnessFilter(loudness: LoudnessParams): string {
  *
  * @param ns - Noise sampling parameters (enabled flag only)
  * @param region - Noise sample region (QuietCandidate with startMs/endMs)
- * @returns FFmpeg afftdn filter string or empty string (bypass)
+ * @returns FFmpeg anlmdn filter string or empty string (bypass)
  */
 export function buildNoiseSamplingFilter(ns: NoiseSamplingParams, region: QuietCandidate | null): string {
   // Explicit bypass if disabled or no region
@@ -599,11 +609,44 @@ export function buildNoiseSamplingFilter(ns: NoiseSamplingParams, region: QuietC
     return ''
   }
 
-  // Region exists and enabled: use fixed conservative afftdn settings
-  // nr=20: moderate noise reduction (20 dB)
-  // nf=-42: noise floor threshold
-  // tn=true: enable noise tracking for adaptive behavior
-  return `afftdn=nr=20:nf=-42:tn=true`
+  // Calculate region duration to tune filter parameters
+  const regionDurationMs = region.endMs - region.startMs
+
+  // anlmdn parameters tuned by noise sample duration:
+  // s (strength): noise reduction strength (0.00001-10000, default 0.00001)
+  // p (patch): patch radius for analysis (0-100, default 7) - smaller = faster
+  // r (research): research window radius (0-100, default 15) - smaller = faster
+  // m (output mode): defines output (i=input, o=output, n=noise)
+  //
+  // Shorter samples = use more aggressive settings (less context available)
+  // Longer samples = use gentler settings (more reliable noise profile)
+
+  let strength: number
+  let patch: number
+  let research: number
+
+  if (regionDurationMs < 500) {
+    // Short sample: aggressive noise reduction, small windows
+    strength = 0.0002
+    patch = 5
+    research = 10
+  } else if (regionDurationMs <= 2000) {
+    // Medium sample: balanced settings
+    strength = 0.0001
+    patch = 7
+    research = 15
+  } else {
+    // Long sample: gentler reduction, larger windows for accuracy
+    strength = 0.00005
+    patch = 10
+    research = 20
+  }
+
+  // Log the parameterization for debugging
+  console.log(`[noise-sampling] Region: ${region.startMs}-${region.endMs}ms (${regionDurationMs}ms duration)`)
+  console.log(`[noise-sampling] anlmdn params: s=${strength}, p=${patch}, r=${research}`)
+
+  return `anlmdn=s=${strength}:p=${patch}:r=${research}:m=o`
 }
 
 /**

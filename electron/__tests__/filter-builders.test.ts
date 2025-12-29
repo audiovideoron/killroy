@@ -97,12 +97,33 @@ function buildLoudnessFilter(loudness: LoudnessParams): string {
 
 /**
  * Build Noise Sampling DSP filter using noiseSampleRegion.
- * Toggle-only: enabled=true uses fixed parameters.
+ * Uses anlmdn with parameters tuned by noise sample duration.
  */
 function buildNoiseSamplingFilter(ns: NoiseSamplingParams, region: QuietCandidate | null): string {
   if (!ns.enabled || !region) return ''
 
-  return 'afftdn=nr=20:nf=-42:tn=true'
+  // Calculate region duration to tune filter parameters
+  const regionDurationMs = region.endMs - region.startMs
+
+  let strength: number
+  let patch: number
+  let research: number
+
+  if (regionDurationMs < 500) {
+    strength = 0.0002
+    patch = 5
+    research = 10
+  } else if (regionDurationMs <= 2000) {
+    strength = 0.0001
+    patch = 7
+    research = 15
+  } else {
+    strength = 0.00005
+    patch = 10
+    research = 20
+  }
+
+  return `anlmdn=s=${strength}:p=${patch}:r=${research}:m=o`
 }
 
 function buildAutoMixFilter(autoMix: AutoMixParams): string {
@@ -643,7 +664,7 @@ describe('buildCompressorFilter', () => {
 })
 
 describe('buildNoiseSamplingFilter', () => {
-  // Default region for tests that need noise sampling to apply
+  // Default region for tests that need noise sampling to apply (1000ms = medium duration)
   const defaultRegion: QuietCandidate = { startMs: 0, endMs: 1000 }
 
   it('returns empty string when disabled', () => {
@@ -658,28 +679,44 @@ describe('buildNoiseSamplingFilter', () => {
     expect(result).toBe('')
   })
 
-  it('builds filter with fixed parameters when enabled', () => {
+  it('builds anlmdn filter with medium region (500-2000ms)', () => {
     const ns: NoiseSamplingParams = { enabled: true }
-    const result = buildNoiseSamplingFilter(ns, defaultRegion)
-    expect(result).toBe('afftdn=nr=20:nf=-42:tn=true')
+    const mediumRegion: QuietCandidate = { startMs: 0, endMs: 1000 }
+    const result = buildNoiseSamplingFilter(ns, mediumRegion)
+    expect(result).toBe('anlmdn=s=0.0001:p=7:r=15:m=o')
   })
 
-  it('always enables noise tracking (tn=true)', () => {
+  it('uses more aggressive settings for short regions (<500ms)', () => {
     const ns: NoiseSamplingParams = { enabled: true }
-    const result = buildNoiseSamplingFilter(ns, defaultRegion)
-    expect(result).toContain(':tn=true')
+    const shortRegion: QuietCandidate = { startMs: 0, endMs: 300 }
+    const result = buildNoiseSamplingFilter(ns, shortRegion)
+    expect(result).toBe('anlmdn=s=0.0002:p=5:r=10:m=o')
   })
 
-  it('uses fixed nr=20 (moderate reduction)', () => {
+  it('uses gentler settings for long regions (>2000ms)', () => {
     const ns: NoiseSamplingParams = { enabled: true }
-    const result = buildNoiseSamplingFilter(ns, defaultRegion)
-    expect(result).toContain('nr=20')
+    const longRegion: QuietCandidate = { startMs: 0, endMs: 3000 }
+    const result = buildNoiseSamplingFilter(ns, longRegion)
+    expect(result).toBe('anlmdn=s=0.00005:p=10:r=20:m=o')
   })
 
-  it('uses fixed nf=-42 (noise floor)', () => {
+  it('uses anlmdn filter (not afftdn)', () => {
     const ns: NoiseSamplingParams = { enabled: true }
     const result = buildNoiseSamplingFilter(ns, defaultRegion)
-    expect(result).toContain('nf=-42')
+    expect(result).toContain('anlmdn=')
+    expect(result).not.toContain('afftdn')
+  })
+
+  it('noiseSampleRegion duration influences filter parameters', () => {
+    const ns: NoiseSamplingParams = { enabled: true }
+    const short = buildNoiseSamplingFilter(ns, { startMs: 0, endMs: 200 })
+    const medium = buildNoiseSamplingFilter(ns, { startMs: 0, endMs: 1500 })
+    const long = buildNoiseSamplingFilter(ns, { startMs: 0, endMs: 5000 })
+
+    // All should be different - parameters are derived from duration
+    expect(short).not.toBe(medium)
+    expect(medium).not.toBe(long)
+    expect(short).not.toBe(long)
   })
 })
 
@@ -736,7 +773,8 @@ describe('buildFullFilterChain', () => {
     const params = createDefaultParams()
     params.noiseSampling.enabled = true
     const result = callChain(params)
-    expect(result).toBe('afftdn=nr=20:nf=-42:tn=true')
+    // 1000ms region = medium settings
+    expect(result).toBe('anlmdn=s=0.0001:p=7:r=15:m=o')
   })
 
   it('builds chain with only EQ enabled', () => {
@@ -787,7 +825,7 @@ describe('buildFullFilterChain', () => {
 
     // Order: Noise Sampling -> HPF -> LPF -> EQ -> Compressor
     expect(result).toBe(
-      `afftdn=nr=20:nf=-42:tn=true,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
+      `anlmdn=s=0.0001:p=7:r=15:m=o,highpass=f=100,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=3,acompressor=threshold=-20dB:ratio=4:attack=${attackSec}:release=${releaseSec}:makeup=0dB`
     )
   })
 
@@ -871,7 +909,7 @@ describe('buildFullFilterChain', () => {
 
     const eqWidth = 2000 / 1.2
 
-    expect(result).toBe(`afftdn=nr=20:nf=-42:tn=true,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
+    expect(result).toBe(`anlmdn=s=0.0001:p=7:r=15:m=o,equalizer=f=2000:t=h:w=${eqWidth}:g=6`)
   })
 
   it('places compressor after EQ and before AutoMix', () => {
@@ -932,7 +970,7 @@ describe('buildFullFilterChain', () => {
 
     // Order: Noise Sampling -> HPF -> LPF -> EQ -> Compressor
     const expected = [
-      'afftdn=nr=20:nf=-42:tn=true',
+      'anlmdn=s=0.0001:p=7:r=15:m=o',
       'highpass=f=75',
       'lowpass=f=16000',
       `equalizer=f=200:t=h:w=${width1}:g=2`,
@@ -984,7 +1022,7 @@ describe('buildFullFilterChain', () => {
       const result = callChain(params)
 
       // Order: Noise Sampling -> LPF -> AutoMix (HPF, EQ, Compressor disabled)
-      expect(result).toBe('afftdn=nr=20:nf=-42:tn=true,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10')
+      expect(result).toBe('anlmdn=s=0.0001:p=7:r=15:m=o,lowpass=f=12000,dynaudnorm=f=200:g=21:p=0.9:m=10')
     })
 
     it('builds complete chain with AutoMix: NS -> HPF -> LPF -> EQ -> COMP -> AutoMix', () => {
@@ -1008,7 +1046,7 @@ describe('buildFullFilterChain', () => {
 
       // Full chain: Noise Sampling -> HPF -> LPF -> EQ -> Compressor -> AutoMix
       expect(result).toBe(
-        `afftdn=nr=20:nf=-42:tn=true,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
+        `anlmdn=s=0.0001:p=7:r=15:m=o,highpass=f=120,lowpass=f=10000,equalizer=f=1000:t=h:w=${eqWidth}:g=4,volume=5dB,dynaudnorm=f=500:g=35:p=0.9:m=6`
       )
     })
 
@@ -1340,7 +1378,7 @@ describe('Toggle Wiring Audit', () => {
   const TOGGLE_SPECS: ToggleSpec[] = [
     {
       name: 'Noise Sampling',
-      filterPattern: /afftdn/,
+      filterPattern: /anlmdn/,
       getEnabledState: () => ({ enabled: true }),
       getDisabledState: () => ({ enabled: false }),
       buildFilter: (ns) => buildNoiseSamplingFilter(ns, defaultRegion)
@@ -1471,9 +1509,9 @@ describe('Toggle Wiring Audit', () => {
       expect(result).toBe('')
     })
 
-    it('only Noise Sampling enabled → only afftdn in chain', () => {
+    it('only Noise Sampling enabled → only anlmdn in chain', () => {
       const result = chain({ ns: { enabled: true } })
-      expect(result).toMatch(/afftdn/)
+      expect(result).toMatch(/anlmdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/lowpass/)
       expect(result).not.toMatch(/equalizer/)
@@ -1484,7 +1522,7 @@ describe('Toggle Wiring Audit', () => {
     it('only HPF enabled → only highpass in chain', () => {
       const result = chain({ hpf: { frequency: 120, q: 0.7, enabled: true } })
       expect(result).toMatch(/highpass/)
-      expect(result).not.toMatch(/afftdn/)
+      expect(result).not.toMatch(/anlmdn/)
       expect(result).not.toMatch(/lowpass/)
       expect(result).not.toMatch(/equalizer/)
       expect(result).not.toMatch(/acompressor/)
@@ -1494,7 +1532,7 @@ describe('Toggle Wiring Audit', () => {
     it('only LPF enabled → only lowpass in chain', () => {
       const result = chain({ lpf: { frequency: 8000, q: 0.7, enabled: true } })
       expect(result).toMatch(/lowpass/)
-      expect(result).not.toMatch(/afftdn/)
+      expect(result).not.toMatch(/anlmdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/equalizer/)
       expect(result).not.toMatch(/acompressor/)
@@ -1507,7 +1545,7 @@ describe('Toggle Wiring Audit', () => {
       ]
       const result = chain({ bands: eqBands })
       expect(result).toMatch(/equalizer/)
-      expect(result).not.toMatch(/afftdn/)
+      expect(result).not.toMatch(/anlmdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/lowpass/)
       expect(result).not.toMatch(/acompressor/)
@@ -1524,7 +1562,7 @@ describe('Toggle Wiring Audit', () => {
       }
       const result = chain({ comp: compNoEmphasis })
       expect(result).toMatch(/acompressor/)
-      expect(result).not.toMatch(/afftdn/)
+      expect(result).not.toMatch(/anlmdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/lowpass/)
       expect(result).not.toMatch(/equalizer/)
@@ -1534,7 +1572,7 @@ describe('Toggle Wiring Audit', () => {
     it('only AutoMix enabled → only dynaudnorm in chain', () => {
       const result = chain({ autoMix: { preset: 'MEDIUM', enabled: true } })
       expect(result).toMatch(/dynaudnorm/)
-      expect(result).not.toMatch(/afftdn/)
+      expect(result).not.toMatch(/anlmdn/)
       expect(result).not.toMatch(/highpass/)
       expect(result).not.toMatch(/lowpass/)
       expect(result).not.toMatch(/equalizer/)
@@ -1557,7 +1595,7 @@ describe('Toggle Wiring Audit', () => {
       })
 
       // All filters present
-      expect(result).toMatch(/afftdn/)
+      expect(result).toMatch(/anlmdn/)
       expect(result).toMatch(/highpass/)
       expect(result).toMatch(/lowpass/)
       expect(result).toMatch(/equalizer/)
@@ -1565,7 +1603,7 @@ describe('Toggle Wiring Audit', () => {
       expect(result).toMatch(/dynaudnorm/)
 
       // Verify order: Noise Sampling → HPF → LPF → EQ → Comp → AutoMix
-      const nsIndex = result.indexOf('afftdn')
+      const nsIndex = result.indexOf('anlmdn')
       const hpfIndex = result.indexOf('highpass')
       const lpfIndex = result.indexOf('lowpass')
       const eqIndex = result.indexOf('equalizer')
@@ -1648,7 +1686,7 @@ describe('Placeholder/Stub Filter Regression Prevention', () => {
     compressor: 'acompressor',
     limiter: 'alimiter',
     volume: 'volume',
-    noiseSampling: 'afftdn',
+    noiseSampling: 'anlmdn',
     autoGain: 'dynaudnorm',
     autoMix: 'dynaudnorm',
     loudness: 'loudnorm',
@@ -1815,10 +1853,10 @@ describe('Placeholder/Stub Filter Regression Prevention', () => {
     })
   })
 
-  describe('buildNoiseSamplingFilter produces real FFmpeg afftdn filter', () => {
+  describe('buildNoiseSamplingFilter produces real FFmpeg anlmdn filter', () => {
     const region: QuietCandidate = { startMs: 0, endMs: 1000 }
 
-    it('uses real "afftdn" filter, not placeholder', () => {
+    it('uses real "anlmdn" filter, not placeholder', () => {
       const ns: NoiseSamplingParams = { enabled: true }
       const result = buildNoiseSamplingFilter(ns, region)
 
@@ -1827,15 +1865,16 @@ describe('Placeholder/Stub Filter Regression Prevention', () => {
       expect(hasValidParameters(result)).toBe(true)
     })
 
-    it('produces valid FFmpeg afftdn syntax with required parameters', () => {
+    it('produces valid FFmpeg anlmdn syntax with required parameters', () => {
       const ns: NoiseSamplingParams = { enabled: true }
       const result = buildNoiseSamplingFilter(ns, region)
 
-      // Must have nr (noise reduction), nf (noise floor), tn (tracking) parameters
-      expect(result).toMatch(/afftdn=/)
-      expect(result).toMatch(/nr=\d+/)
-      expect(result).toMatch(/nf=-?\d+/)
-      expect(result).toMatch(/tn=(true|false)/)
+      // Must have s (strength), p (patch), r (research), m (output mode) parameters
+      expect(result).toMatch(/anlmdn=/)
+      expect(result).toMatch(/s=[\d.]+/)
+      expect(result).toMatch(/p=\d+/)
+      expect(result).toMatch(/r=\d+/)
+      expect(result).toMatch(/m=o/)
     })
   })
 
@@ -1973,7 +2012,7 @@ describe('Placeholder/Stub Filter Regression Prevention', () => {
       // Should contain real FFmpeg filters
       expect(result).toContain('dynaudnorm')
       expect(result).toContain('loudnorm')
-      expect(result).toContain('afftdn')
+      expect(result).toContain('anlmdn')
       expect(result).toContain('highpass')
       expect(result).toContain('lowpass')
       expect(result).toContain('equalizer')
