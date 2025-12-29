@@ -344,13 +344,15 @@ function emitTerminalState(job: FFmpegJob, status: JobStatus, percent: number | 
  * Probe media file metadata using ffprobe with structured JSON output.
  * Much faster and more reliable than parsing ffmpeg stderr.
  * Includes timeout protection (30s default) to prevent hung processes.
+ * Fixed cleanup race condition: timeout timer is properly cleared on success,
+ * and force kill timer is tracked to prevent dangling timers.
  *
  * @param filePath Absolute path to media file (must be validated first)
  * @param timeoutMs Timeout in milliseconds (default: 30 seconds)
  * @returns Promise resolving to parsed ffprobe JSON data
  */
 export async function probeMediaMetadata(filePath: string, timeoutMs: number = 30000): Promise<FFprobeResult> {
-  const probePromise = new Promise<FFprobeResult>((resolve, reject) => {
+  return new Promise<FFprobeResult>((resolve, reject) => {
     const args = [
       '-v', 'quiet',
       '-print_format', 'json',
@@ -365,21 +367,47 @@ export async function probeMediaMetadata(filePath: string, timeoutMs: number = 3
     let stdout = ''
     let stderr = ''
     let resolved = false
+    let forceKillHandle: NodeJS.Timeout | null = null
 
+    // Unified cleanup function - safe to call multiple times
     const cleanup = () => {
+      // Clear force kill timer if pending
+      if (forceKillHandle) {
+        clearTimeout(forceKillHandle)
+        forceKillHandle = null
+      }
+      // Clear timeout timer
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle)
+      }
+      // Kill process if still running
       if (proc && !proc.killed) {
         try {
           proc.kill('SIGTERM')
-          setTimeout(() => {
+          // Schedule force kill, but track the handle so we can cancel it
+          forceKillHandle = setTimeout(() => {
             if (proc && !proc.killed) {
-              proc.kill('SIGKILL')
+              try {
+                proc.kill('SIGKILL')
+              } catch (e) {
+                // Process may have exited between check and kill
+              }
             }
+            forceKillHandle = null
           }, 1000)
         } catch (err) {
           console.error('[ffprobe] Failed to kill process:', err)
         }
       }
     }
+
+    // Timeout protection - timer is cleared on success
+    const timeoutHandle = setTimeout(() => {
+      if (resolved) return
+      resolved = true
+      cleanup()
+      reject(new Error(`ffprobe operation timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
 
     proc.stdout.on('data', (data) => {
       stdout += data.toString()
@@ -392,6 +420,8 @@ export async function probeMediaMetadata(filePath: string, timeoutMs: number = 3
     proc.on('close', (code) => {
       if (resolved) return
       resolved = true
+      // Clear timeout on successful completion - fixes race condition
+      clearTimeout(timeoutHandle)
 
       if (code !== 0) {
         reject(new Error(`ffprobe exited with code ${code}: ${stderr}`))
@@ -414,14 +444,6 @@ export async function probeMediaMetadata(filePath: string, timeoutMs: number = 3
       reject(new Error(`Failed to spawn ffprobe: ${err.message}`))
     })
   })
-
-  const timeoutPromise = new Promise<FFprobeResult>((_, reject) => {
-    setTimeout(() => {
-      reject(new Error(`ffprobe operation timed out after ${timeoutMs / 1000}s`))
-    }, timeoutMs)
-  })
-
-  return Promise.race([probePromise, timeoutPromise])
 }
 
 /**
@@ -930,12 +952,26 @@ function diagnoseFFmpegFailure(stderr: string): string | null {
 }
 
 /**
+ * Registry of pending SIGKILL timeouts for cleanup coordination.
+ * Tracked separately since jobs are removed from main registry immediately.
+ */
+const pendingForceKills = new Map<string, NodeJS.Timeout>()
+
+/**
  * Clean up an FFmpeg job: kill process, clear timeout, remove from registry.
  * Idempotent and safe to call multiple times.
+ * Fixed: SIGKILL timeout is now tracked in pendingForceKills to ensure proper cleanup.
  */
 export function cleanupFFmpegJob(jobId: string): void {
   const job = activeFFmpegJobs.get(jobId)
   if (!job) return
+
+  // Clear any pending force kill timeout from previous cleanup attempt
+  const existingForceKill = pendingForceKills.get(jobId)
+  if (existingForceKill) {
+    clearTimeout(existingForceKill)
+    pendingForceKills.delete(jobId)
+  }
 
   // Clear timeout if exists
   if (job.timeoutHandle) {
@@ -946,12 +982,20 @@ export function cleanupFFmpegJob(jobId: string): void {
   if (job.process && !job.process.killed) {
     try {
       job.process.kill('SIGTERM')
-      // Give it a moment, then force kill if needed
-      setTimeout(() => {
-        if (job.process && !job.process.killed) {
-          job.process.kill('SIGKILL')
+      // Schedule force kill and track the handle for proper cleanup
+      const proc = job.process  // Capture reference before job is removed
+      const forceKillHandle = setTimeout(() => {
+        pendingForceKills.delete(jobId)
+        if (proc && !proc.killed) {
+          try {
+            proc.kill('SIGKILL')
+            console.log(`[ffmpeg] Force killed job ${jobId}`)
+          } catch (e) {
+            // Process may have exited between check and kill
+          }
         }
       }, 1000)
+      pendingForceKills.set(jobId, forceKillHandle)
     } catch (err) {
       console.error('[ffmpeg] Failed to kill process:', err)
     }
@@ -972,6 +1016,18 @@ export function cleanupFFmpegJob(jobId: string): void {
   } else if (needsPlayback) {
     console.log(`[temp] Preserving temp directory for playback: ${job.tempDir}`)
   }
+}
+
+/**
+ * Cancel all pending force kill timeouts.
+ * Call this on app shutdown to prevent dangling timers.
+ */
+export function cancelAllPendingForceKills(): void {
+  for (const [jobId, handle] of pendingForceKills) {
+    clearTimeout(handle)
+    console.log(`[ffmpeg] Cancelled pending force kill for job ${jobId}`)
+  }
+  pendingForceKills.clear()
 }
 
 /**
@@ -1269,6 +1325,7 @@ export function sortQuietCandidates(candidates: QuietCandidate[]): QuietCandidat
 /**
  * Run volumedetect analysis on audio file for diagnostic purposes.
  * Returns mean and max volume levels.
+ * Properly registers with job tracking for lifecycle management.
  */
 async function analyzeVolumeLevels(inputPath: string): Promise<{ mean_volume: string; max_volume: string } | null> {
   return new Promise((resolve) => {
@@ -1279,14 +1336,57 @@ async function analyzeVolumeLevels(inputPath: string): Promise<{ mean_volume: st
       '-'
     ]
 
+    const jobId = `volumedetect-${Date.now()}-${Math.random().toString(36).substring(7)}`
     const proc = spawn('ffmpeg', args)
     let stderr = ''
+    let resolved = false
+
+    const cleanup = () => {
+      if (resolved) return
+      resolved = true
+      // Clear timeout and remove from registry
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle)
+      }
+      activeFFmpegJobs.delete(jobId)
+      console.log(`[volumedetect] Cleaned up job ${jobId}`)
+    }
+
+    // Set up timeout with proper cleanup
+    const timeoutHandle = setTimeout(() => {
+      console.warn(`[volumedetect] Job ${jobId} timed out after 30s`)
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM')
+        // Force kill after grace period
+        setTimeout(() => {
+          if (proc && !proc.killed) {
+            proc.kill('SIGKILL')
+          }
+        }, 1000)
+      }
+      cleanup()
+      resolve(null)
+    }, 30000)
+
+    // Register job for tracking
+    const job: FFmpegJob = {
+      id: jobId,
+      process: proc,
+      startTime: Date.now(),
+      timeoutHandle,
+      phase: 'volumedetect'
+    }
+    activeFFmpegJobs.set(jobId, job)
+    console.log(`[volumedetect] Registered job ${jobId}`)
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString()
     })
 
     proc.on('close', () => {
+      if (resolved) return
+      cleanup()
+
       // Parse volumedetect output
       const meanMatch = stderr.match(/mean_volume:\s*([-\d.]+)\s*dB/)
       const maxMatch = stderr.match(/max_volume:\s*([-\d.]+)\s*dB/)
@@ -1301,15 +1401,12 @@ async function analyzeVolumeLevels(inputPath: string): Promise<{ mean_volume: st
       }
     })
 
-    proc.on('error', () => resolve(null))
-
-    // Timeout after 30s
-    setTimeout(() => {
-      if (proc && !proc.killed) {
-        proc.kill('SIGTERM')
-      }
+    proc.on('error', (err) => {
+      if (resolved) return
+      console.error(`[volumedetect] Job ${jobId} spawn error:`, err)
+      cleanup()
       resolve(null)
-    }, 30000)
+    })
   })
 }
 
