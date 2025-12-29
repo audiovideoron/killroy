@@ -6,15 +6,16 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { spawn } from 'child_process'
 import fetch from 'node-fetch'
 import FormData from 'form-data'
+import { runFFmpeg, FFmpegErrorType } from '../ffmpeg-manager'
 
 const ELEVENLABS_VOICES_API = 'https://api.elevenlabs.io/v1/voices/add'
 
 // Sample extraction settings
 const SAMPLE_START_SEC = 10
 const SAMPLE_DURATION_SEC = 20
+const SAMPLE_EXTRACTION_TIMEOUT_MS = 60 * 1000 // 60 seconds
 
 export interface VoiceCloneResult {
   success: boolean
@@ -24,42 +25,44 @@ export interface VoiceCloneResult {
 }
 
 /**
- * Extract a clean voice sample from video using FFmpeg
+ * Extract a clean voice sample from video using FFmpeg.
+ * Uses runFFmpeg for proper job tracking, timeout handling, and cleanup.
  * Target: mono, 16kHz, normalized WAV
  */
 async function extractVoiceSample(videoPath: string, outputPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-y',
-      '-ss', SAMPLE_START_SEC.toString(),
-      '-t', SAMPLE_DURATION_SEC.toString(),
-      '-i', videoPath,
-      '-vn',           // no video
-      '-ac', '1',      // mono
-      '-ar', '16000',  // 16kHz (safe for voice cloning)
-      '-af', 'loudnorm', // normalize levels
-      outputPath
-    ]
+  const args = [
+    '-y',
+    '-ss', SAMPLE_START_SEC.toString(),
+    '-t', SAMPLE_DURATION_SEC.toString(),
+    '-i', videoPath,
+    '-vn',           // no video
+    '-ac', '1',      // mono
+    '-ar', '16000',  // 16kHz (safe for voice cloning)
+    '-af', 'loudnorm', // normalize levels
+    outputPath
+  ]
 
-    const proc = spawn('ffmpeg', args)
-    let stderr = ''
-
-    proc.stderr.on('data', (data) => {
-      stderr += data.toString()
-    })
-
-    proc.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`FFmpeg sample extraction failed: ${stderr.slice(-500)}`))
-      } else {
-        resolve()
-      }
-    })
-
-    proc.on('error', (err) => {
-      reject(new Error(`FFmpeg not found. Please install ffmpeg: ${err.message}`))
-    })
-  })
+  try {
+    await runFFmpeg(
+      args,
+      SAMPLE_EXTRACTION_TIMEOUT_MS,
+      SAMPLE_DURATION_SEC,
+      'voice-sample-extraction'
+    )
+  } catch (error: any) {
+    // Map FFmpeg error types to user-friendly messages
+    if (error.type === FFmpegErrorType.TIMEOUT) {
+      throw new Error(`Voice sample extraction timed out after ${SAMPLE_EXTRACTION_TIMEOUT_MS / 1000}s`)
+    } else if (error.type === FFmpegErrorType.SPAWN_FAILED) {
+      throw new Error(`FFmpeg not found. Please install ffmpeg: ${error.message}`)
+    } else if (error.type === FFmpegErrorType.CANCELLED) {
+      throw new Error('Voice sample extraction was cancelled')
+    } else {
+      // NON_ZERO_EXIT or unknown
+      const stderrTail = error.stderr ? error.stderr.slice(-500) : ''
+      throw new Error(`FFmpeg sample extraction failed: ${stderrTail}`)
+    }
+  }
 }
 
 /**
