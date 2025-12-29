@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ElevenLabs": {
+      "command": "/Users/rtp/.local/bin/uvx",
+      "args": ["elevenlabs-mcp"],
+      "env": {
+        "ELEVENLABS_API_KEY": "sk_190c788300ea7ee859c681baa706eecf5fdedf5c8781ab5c"
+      }
+    }
+  }
+}

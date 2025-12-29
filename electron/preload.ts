@@ -24,6 +24,8 @@ export type {
 contextBridge.exposeInMainWorld('electronAPI', {
   selectFile: (): Promise<string | null> => ipcRenderer.invoke('select-file'),
 
+  getAutoLoadFile: (): Promise<string | null> => ipcRenderer.invoke('get-auto-load-file'),
+
   renderPreview: (options: RenderOptions): Promise<RenderResult> =>
     ipcRenderer.invoke('render-preview', options),
 
@@ -59,5 +61,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('compute-pending-removals', filePath, edl),
 
   synthesizeVoiceTest: (filePath: string, transcript: TranscriptV1, edl: EdlV1): Promise<{ success: boolean; outputPath?: string; error?: string; report?: { chunks: number; total_target_ms: number; total_synth_ms: number; tempo_adjustments: number } }> =>
-    ipcRenderer.invoke('synthesize-voice-test', filePath, transcript, edl)
+    ipcRenderer.invoke('synthesize-voice-test', filePath, transcript, edl),
+
+  cloneVoice: (filePath: string): Promise<{ success: boolean; voice_id?: string; voice_name?: string; error?: string }> =>
+    ipcRenderer.invoke('clone-voice', filePath)
 })

@@ -1,31 +1,15 @@
 /**
- * Transcript Editor - Minimal word-based editor
+ * Transcript Editor - Contenteditable text editor
+ * Simple implementation with logging throughout
  */
 
-import { useState, useCallback, useEffect } from 'react'
-import type { TranscriptV1, TranscriptToken, EdlV1, RemoveRange } from '../../shared/editor-types'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import type { TranscriptV1, TranscriptToken, EdlV1, RemoveRange, WordReplacement, WordInsertion } from '../../shared/editor-types'
 import { v4 as uuidv4 } from 'uuid'
 
-interface PendingRemovalsResult {
-  ranges: Array<{ start_ms: number; end_ms: number }>
-  total_removed_ms: number
-  duration_ms: number
-}
-
-// Format milliseconds as MM:SS.mmm
-function formatMs(ms: number): string {
-  const totalSec = Math.floor(ms / 1000)
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  const millis = ms % 1000
-  return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`
-}
-
-interface SynthesisReport {
-  chunks: number
-  total_target_ms: number
-  total_synth_ms: number
-  tempo_adjustments: number
+// Logging helper
+const log = (msg: string, ...args: unknown[]) => {
+  console.log(`[TranscriptEditor] ${msg}`, ...args)
 }
 
 interface TranscriptEditorProps {
@@ -40,123 +24,170 @@ interface TranscriptEditorProps {
   onSynthesisComplete?: (videoUrl: string) => void
 }
 
-export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExport, isExporting, exportError, exportSuccess, onSynthesisComplete }: TranscriptEditorProps) {
-  const [selectedTokenIds, setSelectedTokenIds] = useState<Set<string>>(new Set())
-  const [pendingRemovals, setPendingRemovals] = useState<PendingRemovalsResult | null>(null)
+export function TranscriptEditor({
+  filePath,
+  transcript,
+  edl,
+  onEdlChange,
+  onExport,
+  isExporting,
+  exportError,
+  exportSuccess,
+  onSynthesisComplete
+}: TranscriptEditorProps) {
+  log('Render - tokens:', transcript.tokens.length)
+  if (transcript.tokens.length > 0) {
+    log('First 3 tokens:', transcript.tokens.slice(0, 3).map(t => ({ id: t.token_id.slice(0,8), text: t.text })))
+  } else {
+    log('WARNING: No tokens in transcript!')
+  }
+
+  const editorRef = useRef<HTMLDivElement>(null)
   const [isSynthesizing, setIsSynthesizing] = useState(false)
   const [synthesisError, setSynthesisError] = useState<string | null>(null)
-  const [synthesisReport, setSynthesisReport] = useState<SynthesisReport | null>(null)
+  const [isCloning, setIsCloning] = useState(false)
+  const [cloneResult, setCloneResult] = useState<{ success: boolean; voice_name?: string; error?: string } | null>(null)
 
-  // Compute pending removals when edl changes
+  // Edit tracking
+  const [deletedTokenIds, setDeletedTokenIds] = useState<Set<string>>(new Set())
+  const [modifications, setModifications] = useState<Map<string, string>>(new Map())
+  const [insertions, setInsertions] = useState<Map<string, string>>(new Map()) // after_token_id -> text
+
+  // Build token lookup
+  const tokenMap = useRef<Map<string, TranscriptToken>>(new Map())
   useEffect(() => {
-    if (edl.remove_ranges.length === 0) {
-      setPendingRemovals(null)
-      return
-    }
+    tokenMap.current = new Map(transcript.tokens.map(t => [t.token_id, t]))
+    log('Token map built:', tokenMap.current.size, 'tokens')
+  }, [transcript.tokens])
 
-    window.electronAPI.computePendingRemovals(filePath, edl)
-      .then(setPendingRemovals)
-      .catch(() => setPendingRemovals(null))
-  }, [filePath, edl])
+  // Sync edits to EDL
+  useEffect(() => {
+    const removeRanges: RemoveRange[] = []
+    const replacements: WordReplacement[] = []
+    const insertionList: WordInsertion[] = []
 
-  // Check if token is removed
-  const isTokenRemoved = useCallback(
-    (token: TranscriptToken): boolean => {
-      return edl.remove_ranges.some(
-        (range) => token.start_ms >= range.start_ms && token.end_ms <= range.end_ms
-      )
-    },
-    [edl.remove_ranges]
-  )
-
-  // Toggle token selection
-  const toggleTokenSelection = useCallback((tokenId: string) => {
-    setSelectedTokenIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(tokenId)) {
-        next.delete(tokenId)
-      } else {
-        next.add(tokenId)
+    // Build remove ranges from deleted tokens
+    deletedTokenIds.forEach(tokenId => {
+      const token = tokenMap.current.get(tokenId)
+      if (token) {
+        removeRanges.push({
+          range_id: uuidv4(),
+          start_ms: token.start_ms,
+          end_ms: token.end_ms,
+          source: 'user',
+          reason: 'selection'
+        })
       }
-      return next
     })
-  }, [])
 
-  // Delete selected tokens
-  const deleteSelection = useCallback(() => {
-    if (selectedTokenIds.size === 0) return
+    // Build replacements from modifications
+    modifications.forEach((newText, tokenId) => {
+      const token = tokenMap.current.get(tokenId)
+      if (token) {
+        replacements.push({
+          replacement_id: uuidv4(),
+          token_id: tokenId,
+          original_text: token.text,
+          replacement_text: newText,
+          start_ms: token.start_ms,
+          end_ms: token.end_ms
+        })
+      }
+    })
 
-    const tokensToRemove = transcript.tokens.filter((t) =>
-      selectedTokenIds.has(t.token_id)
-    )
-
-    if (tokensToRemove.length === 0) return
-
-    // Compute remove range from selected tokens
-    const start_ms = Math.min(...tokensToRemove.map((t) => t.start_ms))
-    const end_ms = Math.max(...tokensToRemove.map((t) => t.end_ms))
-
-    const newRemoveRange: RemoveRange = {
-      range_id: uuidv4(),
-      start_ms,
-      end_ms,
-      source: 'user',
-      reason: 'selection'
-    }
-
-    // Append to EDL
-    const newEdl: EdlV1 = {
-      ...edl,
-      edl_version_id: uuidv4(), // New version
-      created_at: new Date().toISOString(),
-      remove_ranges: [...edl.remove_ranges, newRemoveRange]
-    }
-
-    onEdlChange(newEdl)
-    setSelectedTokenIds(new Set()) // Clear selection
-  }, [selectedTokenIds, transcript.tokens, edl, onEdlChange])
-
-  // Undo (remove last remove_range)
-  const undo = useCallback(() => {
-    if (edl.remove_ranges.length === 0) return
+    // Build insertions
+    insertions.forEach((text, afterTokenId) => {
+      insertionList.push({
+        insertion_id: uuidv4(),
+        text,
+        after_token_id: afterTokenId || null
+      })
+    })
 
     const newEdl: EdlV1 = {
       ...edl,
       edl_version_id: uuidv4(),
       created_at: new Date().toISOString(),
-      remove_ranges: edl.remove_ranges.slice(0, -1)
+      remove_ranges: removeRanges,
+      replacements: replacements.length > 0 ? replacements : undefined,
+      insertions: insertionList.length > 0 ? insertionList : undefined
     }
 
+    log('EDL update - deletions:', removeRanges.length, 'replacements:', replacements.length, 'insertions:', insertionList.length)
     onEdlChange(newEdl)
-  }, [edl, onEdlChange])
+  }, [deletedTokenIds, modifications, insertions])
+
+  // Handle input changes - diff against original
+  const handleInput = useCallback(() => {
+    if (!editorRef.current) return
+
+    const newDeletedIds = new Set<string>()
+    const newModifications = new Map<string, string>()
+    const newInsertions = new Map<string, string>()
+
+    // Walk the DOM and compare to original tokens
+    const spans = editorRef.current.querySelectorAll('span[data-token-id]')
+    const foundTokenIds = new Set<string>()
+
+    spans.forEach(span => {
+      const tokenId = span.getAttribute('data-token-id')
+      if (!tokenId) return
+
+      foundTokenIds.add(tokenId)
+      const originalToken = tokenMap.current.get(tokenId)
+      if (!originalToken) return
+
+      const currentText = span.textContent?.trim() || ''
+      const originalText = originalToken.text.trim()
+
+      if (currentText !== originalText && currentText.length > 0) {
+        newModifications.set(tokenId, currentText)
+      }
+    })
+
+    // Find deleted tokens (in original but not in DOM)
+    transcript.tokens.forEach(token => {
+      if (!foundTokenIds.has(token.token_id)) {
+        newDeletedIds.add(token.token_id)
+      }
+    })
+
+    // Check for inserted text (text nodes not inside token spans)
+    // For now, simplified - just track deletions and modifications
+
+    log('Input - found:', foundTokenIds.size, 'deleted:', newDeletedIds.size, 'modified:', newModifications.size)
+
+    setDeletedTokenIds(newDeletedIds)
+    setModifications(newModifications)
+  }, [transcript.tokens])
 
   // Clear all edits
   const clearAll = useCallback(() => {
-    const newEdl: EdlV1 = {
-      ...edl,
-      edl_version_id: uuidv4(),
-      created_at: new Date().toISOString(),
-      remove_ranges: []
+    log('Clear all edits')
+    setDeletedTokenIds(new Set())
+    setModifications(new Map())
+    setInsertions(new Map())
+
+    // Reset editor content
+    if (editorRef.current) {
+      editorRef.current.innerHTML = transcript.tokens
+        .map(t => `<span data-token-id="${t.token_id}" class="token">${t.text}</span>`)
+        .join(' ')
     }
+  }, [transcript.tokens])
 
-    onEdlChange(newEdl)
-    setSelectedTokenIds(new Set())
-  }, [edl, onEdlChange])
-
-  // Synthesize voice
+  // Synthesize
   const synthesizeVoice = useCallback(async () => {
+    log('Starting synthesis')
     setIsSynthesizing(true)
     setSynthesisError(null)
-    setSynthesisReport(null)
 
     try {
       const result = await window.electronAPI.synthesizeVoiceTest(filePath, transcript, edl)
-
       if (result.success && result.outputPath) {
-        setSynthesisReport(result.report || null)
-        // Get file URL and notify parent to load it
+        log('Synthesis success:', result.outputPath)
         const videoUrl = await window.electronAPI.getFileUrl(result.outputPath)
-        onSynthesisComplete?.(videoUrl)
+        onSynthesisComplete?.(`${videoUrl}?v=${Date.now()}`)
       } else {
         setSynthesisError(result.error || 'Synthesis failed')
       }
@@ -167,170 +198,103 @@ export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExp
     }
   }, [filePath, transcript, edl, onSynthesisComplete])
 
+  // Clone voice
+  const cloneVoice = useCallback(async () => {
+    log('Starting voice clone')
+    setIsCloning(true)
+    setCloneResult(null)
+
+    try {
+      const result = await window.electronAPI.cloneVoice(filePath)
+      setCloneResult(result)
+    } catch (err) {
+      setCloneResult({ success: false, error: String(err) })
+    } finally {
+      setIsCloning(false)
+    }
+  }, [filePath])
+
+  const hasEdits = deletedTokenIds.size > 0 || modifications.size > 0 || insertions.size > 0
+
+  // Build initial HTML content
+  const initialHtml = transcript.tokens
+    .map(t => `<span data-token-id="${t.token_id}" class="token">${t.text}</span>`)
+    .join(' ')
+
+  log('Rendering with initialHtml length:', initialHtml.length)
+
+  // Debug: log what we're actually rendering
+  console.log('[TranscriptEditor] About to render HTML:', initialHtml.substring(0, 200))
+  console.log('[TranscriptEditor] HTML length:', initialHtml.length, 'chars')
+
+  // Debug: verify DOM content after mount
+  useEffect(() => {
+    if (editorRef.current) {
+      const domContent = editorRef.current.innerHTML
+      console.log('[TranscriptEditor] DOM innerHTML after mount:', domContent.substring(0, 200))
+      console.log('[TranscriptEditor] DOM innerHTML length:', domContent.length, 'chars')
+      if (domContent.length === 0 && initialHtml.length > 0) {
+        console.error('[TranscriptEditor] BUG: HTML was not applied to DOM!')
+        // Force-apply content
+        editorRef.current.innerHTML = initialHtml
+        console.log('[TranscriptEditor] Force-applied innerHTML')
+      }
+    }
+  }, [initialHtml])
+
   return (
     <div className="transcript-editor">
+      {/* Controls */}
       <div className="transcript-controls">
-        <button onClick={deleteSelection} disabled={selectedTokenIds.size === 0}>
-          Delete Selected ({selectedTokenIds.size})
-        </button>
-        <button onClick={undo} disabled={edl.remove_ranges.length === 0}>
-          Undo
-        </button>
-        <button onClick={clearAll} disabled={edl.remove_ranges.length === 0}>
-          Clear All
-        </button>
-        <span className="edits-count">
-          {edl.remove_ranges.length} edit{edl.remove_ranges.length === 1 ? '' : 's'}
+        <span className="edits-summary">
+          {deletedTokenIds.size > 0 && <span className="badge deleted">{deletedTokenIds.size} deleted</span>}
+          {modifications.size > 0 && <span className="badge modified">{modifications.size} modified</span>}
+          {insertions.size > 0 && <span className="badge inserted">{insertions.size} inserted</span>}
+          {!hasEdits && <span className="no-edits">Click in text to edit</span>}
         </span>
-        <button
-          onClick={onExport}
-          disabled={isExporting}
-          style={{
-            marginLeft: 'auto',
-            background: '#4fc3f7',
-            color: '#000',
-            fontWeight: 600,
-            border: '1px solid #333'
-          }}
-        >
-          {isExporting ? 'Exporting...' : 'Export Edited Video'}
+        <button onClick={clearAll} disabled={!hasEdits}>Clear All</button>
+        <button onClick={onExport} disabled={isExporting} className="export-btn">
+          {isExporting ? 'Exporting...' : 'Export'}
         </button>
-        <button
-          onClick={synthesizeVoice}
-          disabled={isSynthesizing}
-          style={{
-            background: '#ab47bc',
-            color: '#fff',
-            fontWeight: 600,
-            border: '1px solid #333'
-          }}
-        >
-          {isSynthesizing ? 'Synthesizing...' : 'Synthesize Voice (Test)'}
+        <button onClick={synthesizeVoice} disabled={isSynthesizing} className="synth-btn">
+          {isSynthesizing ? 'Synthesizing...' : 'Synthesize'}
+        </button>
+        <button onClick={cloneVoice} disabled={isCloning} className="clone-btn">
+          {isCloning ? 'Cloning...' : 'Clone Voice'}
         </button>
       </div>
 
-      {exportSuccess && (
-        <div style={{
-          padding: '12px',
-          background: '#4caf50',
-          color: 'white',
-          borderRadius: 4,
-          marginBottom: 16
-        }}>
-          ✓ Exported successfully: {exportSuccess.split('/').pop()}
-        </div>
-      )}
+      {/* Status messages */}
+      {exportSuccess && <div className="status success">✓ Exported: {exportSuccess.split('/').pop()}</div>}
+      {exportError && <div className="status error">Export failed: {exportError}</div>}
+      {synthesisError && <div className="status error">Synthesis failed: {synthesisError}</div>}
+      {cloneResult?.success && <div className="status success">✓ Voice cloned: {cloneResult.voice_name}</div>}
+      {cloneResult && !cloneResult.success && <div className="status error">Clone failed: {cloneResult.error}</div>}
 
-      {exportError && (
-        <div style={{
-          padding: '12px',
-          background: '#f44',
-          color: 'white',
-          borderRadius: 4,
-          marginBottom: 16
-        }}>
-          Export failed: {exportError}
-        </div>
-      )}
-
-      {/* Synthesis Status */}
-      {synthesisReport && (
-        <div style={{
-          padding: '12px',
-          background: '#7b1fa2',
-          color: 'white',
-          borderRadius: 4,
-          marginBottom: 16
-        }}>
-          ✓ Synthesis complete: {synthesisReport.chunks} chunks, {formatMs(synthesisReport.total_synth_ms)} synthesized → {formatMs(synthesisReport.total_target_ms)} target
-          {synthesisReport.tempo_adjustments > 0 && ` (${synthesisReport.tempo_adjustments} tempo adjustments)`}
-        </div>
-      )}
-
-      {synthesisError && (
-        <div style={{
-          padding: '12px',
-          background: '#f44',
-          color: 'white',
-          borderRadius: 4,
-          marginBottom: 16
-        }}>
-          Synthesis failed: {synthesisError}
-        </div>
-      )}
-
-      {/* Pending Removals Diagnostic */}
-      {pendingRemovals && pendingRemovals.ranges.length > 0 && (
-        <div style={{
-          padding: '12px',
-          background: '#2a2a2a',
-          border: '1px solid #444',
-          borderRadius: 4,
-          marginBottom: 16,
-          fontSize: 13,
-          fontFamily: 'monospace'
-        }}>
-          <div style={{ color: '#888', marginBottom: 8 }}>Pending Removals (effective ranges after padding/merge):</div>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ color: '#aaa', textAlign: 'left' }}>
-                <th style={{ padding: '4px 8px' }}>#</th>
-                <th style={{ padding: '4px 8px' }}>Start</th>
-                <th style={{ padding: '4px 8px' }}>End</th>
-                <th style={{ padding: '4px 8px' }}>Duration</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pendingRemovals.ranges.map((r, i) => (
-                <tr key={i} style={{ color: '#ddd' }}>
-                  <td style={{ padding: '4px 8px' }}>{i + 1}</td>
-                  <td style={{ padding: '4px 8px' }}>{formatMs(r.start_ms)}</td>
-                  <td style={{ padding: '4px 8px' }}>{formatMs(r.end_ms)}</td>
-                  <td style={{ padding: '4px 8px' }}>{formatMs(r.end_ms - r.start_ms)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #444', color: '#4fc3f7' }}>
-            Total removed: {formatMs(pendingRemovals.total_removed_ms)} / {formatMs(pendingRemovals.duration_ms)} ({((pendingRemovals.total_removed_ms / pendingRemovals.duration_ms) * 100).toFixed(1)}%)
-          </div>
-        </div>
-      )}
-
-      <div className="transcript-text">
-        {transcript.tokens.map((token) => {
-          const isRemoved = isTokenRemoved(token)
-          const isSelected = selectedTokenIds.has(token.token_id)
-
-          return (
-            <span
-              key={token.token_id}
-              className={`token ${isRemoved ? 'removed' : ''} ${isSelected ? 'selected' : ''}`}
-              onClick={() => !isRemoved && toggleTokenSelection(token.token_id)}
-              data-token-id={token.token_id}
-              data-start-ms={token.start_ms}
-              data-end-ms={token.end_ms}
-            >
-              {token.text}{' '}
-            </span>
-          )
-        })}
-      </div>
+      {/* Editor - using dangerouslySetInnerHTML for proper contentEditable */}
+      <div
+        ref={editorRef}
+        className="transcript-text"
+        contentEditable
+        suppressContentEditableWarning
+        onInput={handleInput}
+        spellCheck={false}
+        dangerouslySetInnerHTML={{ __html: initialHtml }}
+      />
 
       <style>{`
         .transcript-editor {
-          padding: 20px;
+          padding: 16px;
           background: #f5f5f5;
           border-radius: 8px;
         }
-
         .transcript-controls {
-          margin-bottom: 16px;
           display: flex;
           gap: 8px;
           align-items: center;
+          flex-wrap: wrap;
+          margin-bottom: 12px;
         }
-
         .transcript-controls button {
           padding: 8px 16px;
           border: 1px solid #ccc;
@@ -338,52 +302,61 @@ export function TranscriptEditor({ filePath, transcript, edl, onEdlChange, onExp
           border-radius: 4px;
           cursor: pointer;
         }
-
         .transcript-controls button:hover:not(:disabled) {
           background: #e0e0e0;
         }
-
         .transcript-controls button:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-
-        .edits-count {
-          margin-left: auto;
-          color: #666;
+        .export-btn { background: #4fc3f7 !important; color: #000; font-weight: 600; }
+        .synth-btn { background: #ab47bc !important; color: #fff; font-weight: 600; }
+        .clone-btn { background: #ff7043 !important; color: #fff; font-weight: 600; }
+        .edits-summary {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          margin-right: auto;
+        }
+        .badge {
+          padding: 4px 8px;
+          border-radius: 4px;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .badge.deleted { background: #fee2e2; color: #991b1b; }
+        .badge.modified { background: #fef3c7; color: #92400e; }
+        .badge.inserted { background: #dcfce7; color: #166534; }
+        .no-edits { color: #666; font-size: 14px; }
+        .status {
+          padding: 8px 12px;
+          border-radius: 4px;
+          margin-bottom: 12px;
           font-size: 14px;
         }
-
+        .status.success { background: #4caf50; color: white; }
+        .status.error { background: #f44336; color: white; }
         .transcript-text {
           background: white;
+          color: #000;
           padding: 16px;
           border-radius: 4px;
-          line-height: 1.8;
+          line-height: 2;
           font-size: 16px;
-          user-select: none;
+          min-height: 150px;
+          outline: none;
+          border: 2px solid transparent;
         }
-
-        .token {
-          cursor: pointer;
-          padding: 2px 0;
-          transition: background-color 0.1s;
-          color: #111;
+        .transcript-text:focus {
+          border-color: #2196f3;
         }
-
-        .token:hover:not(.removed) {
-          background-color: #e3f2fd;
+        .transcript-text .token {
+          padding: 2px 4px;
+          border-radius: 2px;
+          color: #000;
         }
-
-        .token.selected {
-          background-color: #2196f3;
-          color: white;
-        }
-
-        .token.removed {
-          text-decoration: line-through;
-          color: #777;
-          opacity: 0.6;
-          cursor: not-allowed;
+        .transcript-text .token:hover {
+          background: #e3f2fd;
         }
       `}</style>
     </div>

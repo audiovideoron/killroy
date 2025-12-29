@@ -52,6 +52,29 @@ export interface EdlParams {
   audio_crossfade_ms: number
 }
 
+/**
+ * Word replacement for synthesis
+ * When a word is replaced, the original audio is silenced and synth fills the gap
+ */
+export interface WordReplacement {
+  replacement_id: string
+  token_id: string          // Reference to original token
+  original_text: string
+  replacement_text: string
+  start_ms: number          // Original timing preserved
+  end_ms: number
+}
+
+/**
+ * Word insertion for synthesis
+ * New text inserted after a token - creates NEW time in the output
+ */
+export interface WordInsertion {
+  insertion_id: string
+  text: string              // The new text to synthesize
+  after_token_id: string | null  // Insert after this token (null = beginning)
+}
+
 export interface EdlV1 {
   version: '1'
   video_id: string
@@ -59,6 +82,8 @@ export interface EdlV1 {
   created_at: string
   params: EdlParams
   remove_ranges: RemoveRange[]
+  replacements?: WordReplacement[]  // Optional for backwards compatibility
+  insertions?: WordInsertion[]      // Optional - new text creating new time
 }
 
 // ============================================================================
@@ -130,5 +155,28 @@ export function validateEdlV1(edl: EdlV1): void {
 
   for (const range of edl.remove_ranges) {
     validateTimeRange(range)
+  }
+
+  // Validate replacements if present
+  if (edl.replacements) {
+    for (const repl of edl.replacements) {
+      assertIntegerMs(repl.start_ms, 'replacement.start_ms')
+      assertIntegerMs(repl.end_ms, 'replacement.end_ms')
+      if (repl.end_ms < repl.start_ms) {
+        throw new Error(`Replacement ${repl.replacement_id}: end_ms must be >= start_ms`)
+      }
+    }
+  }
+
+  // Validate insertions if present
+  if (edl.insertions) {
+    for (const ins of edl.insertions) {
+      if (!ins.insertion_id) {
+        throw new Error('Insertion missing insertion_id')
+      }
+      if (!ins.text || ins.text.trim().length === 0) {
+        throw new Error(`Insertion ${ins.insertion_id}: text must not be empty`)
+      }
+    }
   }
 }

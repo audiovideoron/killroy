@@ -14,6 +14,7 @@ export interface FinalRenderOptions {
   videoAsset: VideoAsset
   edl: EdlV1
   outputPath: string
+  synthesizedAudioPath?: string  // Optional path to synthesized audio track
 }
 
 export interface RenderReport {
@@ -31,7 +32,7 @@ export interface RenderReport {
  * Render final edited video
  */
 export async function renderFinal(options: FinalRenderOptions): Promise<RenderReport> {
-  const { videoAsset, edl, outputPath } = options
+  const { videoAsset, edl, outputPath, synthesizedAudioPath } = options
   const startTime = Date.now()
 
   // Validate input video path
@@ -71,6 +72,10 @@ export async function renderFinal(options: FinalRenderOptions): Promise<RenderRe
 
   try {
     console.log(`[final-render] Extracting ${keepRanges.length} segment(s)...`)
+    const useSynthesizedAudio = synthesizedAudioPath && fs.existsSync(synthesizedAudioPath)
+    if (useSynthesizedAudio) {
+      console.log('[final-render] Using synthesized audio track')
+    }
 
     // Extract each segment
     for (let i = 0; i < keepRanges.length; i++) {
@@ -78,7 +83,11 @@ export async function renderFinal(options: FinalRenderOptions): Promise<RenderRe
       const segmentPath = path.join(tmpDir, `segment-${i}.mp4`)
 
       console.log(`[final-render] Extracting segment ${i + 1} of ${keepRanges.length}...`)
-      await extractSegment(videoAsset.file_path, range, segmentPath)
+      if (useSynthesizedAudio) {
+        await extractSegmentWithSynthAudio(videoAsset.file_path, synthesizedAudioPath!, range, segmentPath)
+      } else {
+        await extractSegment(videoAsset.file_path, range, segmentPath)
+      }
       segmentPaths.push(segmentPath)
     }
 
@@ -115,7 +124,7 @@ export async function renderFinal(options: FinalRenderOptions): Promise<RenderRe
 }
 
 /**
- * Extract a single segment
+ * Extract a single segment (original audio)
  */
 async function extractSegment(
   inputPath: string,
@@ -142,6 +151,45 @@ async function extractSegment(
     await runFFmpeg({ args, timeoutMs: 10 * 60 * 1000 })
   } catch (error: any) {
     throw new Error(`ffmpeg segment extraction failed: ${error.message}`)
+  }
+}
+
+/**
+ * Extract segment with synthesized audio
+ * Video from original, audio from synthesized track
+ */
+async function extractSegmentWithSynthAudio(
+  videoPath: string,
+  synthAudioPath: string,
+  range: { start_ms: number; end_ms: number },
+  outputPath: string
+): Promise<void> {
+  const start_sec = range.start_ms / 1000
+  const duration_sec = (range.end_ms - range.start_ms) / 1000
+
+  const args = [
+    '-y',
+    '-ss', start_sec.toString(),
+    '-t', duration_sec.toString(),
+    '-i', videoPath,
+    '-ss', start_sec.toString(),
+    '-t', duration_sec.toString(),
+    '-i', synthAudioPath,
+    '-map', '0:v:0',      // Video from input 0 (original video)
+    '-map', '1:a:0',      // Audio from input 1 (synthesized audio)
+    '-c:v', 'libx264',
+    '-preset', 'fast',
+    '-crf', '23',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-shortest',
+    outputPath
+  ]
+
+  try {
+    await runFFmpeg({ args, timeoutMs: 10 * 60 * 1000 })
+  } catch (error: any) {
+    throw new Error(`ffmpeg segment extraction with synth audio failed: ${error.message}`)
   }
 }
 

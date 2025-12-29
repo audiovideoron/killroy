@@ -32,6 +32,11 @@ export function setupAppfileProtocolHandler(): void {
 
       // Validate against allowlist
       const validatedPath = validateFilePath(filePath)
+      console.log('[appfile] Protocol decision:', {
+        requestedPath: filePath,
+        approved: !!validatedPath,
+        resolvedPath: validatedPath || '(blocked)'
+      })
       if (!validatedPath) {
         console.error('[appfile] Blocked unapproved path:', filePath)
         return new Response('Forbidden', { status: 403 })

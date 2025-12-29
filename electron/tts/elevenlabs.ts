@@ -63,7 +63,12 @@ export async function synthesizeWithElevenLabs(
   const apiKey = process.env.ELEVENLABS_API_KEY
   if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not set')
 
-  const res = await fetch(`${ELEVENLABS_API}/${voiceId}`, {
+  const apiUrl = `${ELEVENLABS_API}/${voiceId}`
+  console.log(`[elevenlabs] API call: POST ${apiUrl}`)
+  console.log(`[elevenlabs] voiceId: ${voiceId}`)
+  console.log(`[elevenlabs] text: "${text.substring(0, 50)}..."`)
+
+  const res = await fetch(apiUrl, {
     method: 'POST',
     headers: {
       'xi-api-key': apiKey,
@@ -78,6 +83,7 @@ export async function synthesizeWithElevenLabs(
 
   if (!res.ok) {
     const err = await res.text()
+    console.error(`[elevenlabs] API ERROR: ${res.status} ${err}`)
     throw new Error(`ElevenLabs failed: ${res.status} ${err}`)
   }
 
@@ -85,6 +91,8 @@ export async function synthesizeWithElevenLabs(
   const contentType = res.headers.get('content-type')
   const detectedType = detectAudioType(contentType, buffer)
   const finalPath = fixExtension(outPath, detectedType)
+
+  console.log(`[elevenlabs] SUCCESS: ${buffer.length} bytes, type=${detectedType}, saved to ${finalPath}`)
 
   fs.writeFileSync(finalPath, buffer)
   return finalPath

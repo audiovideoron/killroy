@@ -364,6 +364,18 @@ function App() {
     }
   }, [filePath, transcriptCache, isTranscriptLoading, loadTranscript])
 
+  // Dev workflow: auto-load file from DEV_AUTO_LOAD_FILE env var on startup
+  useEffect(() => {
+    const checkAutoLoad = async () => {
+      const autoLoadPath = await window.electronAPI.getAutoLoadFile()
+      if (autoLoadPath) {
+        console.log('[dev] Auto-loading file:', autoLoadPath)
+        setFilePath(autoLoadPath)
+      }
+    }
+    checkAutoLoad()
+  }, [])
+
   const updateBand = (index: number, field: keyof EQBand, value: number | boolean) => {
     markDirtyAndSetBands(prev => {
       const updated = [...prev]

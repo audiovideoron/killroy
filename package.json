@@ -8,12 +8,14 @@
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:auto": "DEV_AUTO_LOAD_FILE=media/IMG_0061-30sec.MOV concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev:edit": "ASR_BACKEND=elevenlabs DEV_AUTO_LOAD_FILE=media/IMG_0061-30sec.MOV vite",
     "electron:build": "vite build && electron-builder",
     "test": "vitest",
-    "test:alpha": "vitest run --reporter=verbose",
-    "asr:check": "node -e \"const fs=require('fs');const b=process.env.ASR_BACKEND||'mock';console.log('ASR Backend:',b);if(b==='whispercpp'){const m=process.env.WHISPER_MODEL||'';const bin=process.env.WHISPER_CPP_BIN||'/opt/homebrew/bin/whisper-cli';console.log('Model path:',m||'NOT SET');console.log('Binary path:',bin);let failed=false;if(!m||!fs.existsSync(m)){console.log('✗ Model file NOT FOUND');failed=true}else{console.log('✓ Model file exists')}if(!fs.existsSync(bin)){console.log('✗ Binary NOT FOUND');failed=true}else{console.log('✓ Binary exists')}if(failed)process.exit(1)}else{console.log('(Using mock backend — no model/binary required)')}\""
+    "test:alpha": "vitest run --reporter=verbose"
   },
   "dependencies": {
+    "form-data": "^4.0.5",
     "node-fetch": "^3.3.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

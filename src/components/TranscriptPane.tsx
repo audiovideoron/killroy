@@ -53,7 +53,7 @@ export function TranscriptPane({
           fontSize: 14,
           fontWeight: 500
         }}>
-          ⚠ Mock transcript in use — Whisper ASR not configured
+          ⚠ Mock transcript in use — ElevenLabs API not configured
         </div>
         {transcript && edl && (
           <TranscriptEditor

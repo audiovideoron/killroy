@@ -1,10 +1,10 @@
 /**
- * ASR Adapter Interface and Mock Implementation
+ * ASR Adapter Interface and ElevenLabs Implementation
  */
 
 import type { TranscriptV1, TranscriptToken, TranscriptSegment } from '../shared/editor-types'
 import { v4 as uuidv4 } from 'uuid'
-import { WhisperCppTranscriber } from './asr/WhisperCppTranscriber'
+import { ElevenLabsTranscriber } from './asr/ElevenLabsTranscriber'
 
 /**
  * ASR Transcriber Interface
@@ -77,38 +77,33 @@ export class MockTranscriber implements ITranscriber {
 /**
  * Get transcriber instance based on configuration
  * Controlled by ASR_BACKEND environment variable:
- * - 'mock' (default): MockTranscriber for testing
- * - 'whispercpp': Real Whisper.cpp transcriber
+ * - 'elevenlabs' (default): ElevenLabs Scribe API (real word-level timestamps)
+ * - 'mock': MockTranscriber for testing
  */
 export function getTranscriber(): ITranscriber {
-  const backend = process.env.ASR_BACKEND || 'mock'
+  const backend = process.env.ASR_BACKEND || 'elevenlabs'
 
   console.log('=== ASR BACKEND INITIALIZATION ===')
   console.log('ASR_BACKEND:', backend)
 
-  if (backend === 'whispercpp') {
-    const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cli'
-    const modelPath = process.env.WHISPER_MODEL || ''
-
-    console.log('WHISPER_CPP_BIN:', binPath)
-    console.log('WHISPER_MODEL:', modelPath)
-
-    if (!modelPath) {
-      const error = 'WHISPER_MODEL environment variable must be set when using ASR_BACKEND=whispercpp'
-      console.error('ERROR:', error)
-      throw new Error(error)
-    }
-
-    console.log('✓ Using WhisperCppTranscriber')
-    return new WhisperCppTranscriber({
-      binPath,
-      modelPath,
-      threads: parseInt(process.env.WHISPER_THREADS || '4', 10),
-      language: process.env.WHISPER_LANGUAGE || 'en'
-    })
+  if (backend === 'mock') {
+    console.log('✓ Using MockTranscriber')
+    return new MockTranscriber()
   }
 
-  // Default: mock transcriber
-  console.log('✓ Using MockTranscriber (default)')
-  return new MockTranscriber()
+  // Default: ElevenLabs
+  const apiKey = process.env.ELEVENLABS_API_KEY
+
+  if (!apiKey) {
+    const error = 'ELEVENLABS_API_KEY must be set for ASR'
+    console.error('ERROR:', error)
+    throw new Error(error)
+  }
+
+  console.log('✓ Using ElevenLabsTranscriber (real word-level timestamps)')
+  return new ElevenLabsTranscriber({
+    apiKey,
+    language: process.env.ELEVENLABS_LANGUAGE || undefined,
+    diarize: process.env.ELEVENLABS_DIARIZE === 'true'
+  })
 }

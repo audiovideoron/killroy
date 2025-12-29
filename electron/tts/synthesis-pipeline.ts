@@ -10,7 +10,7 @@ import { synthesizeWithElevenLabs } from './elevenlabs'
 import { probeAudioDuration } from '../media-metadata'
 import { buildEffectiveRemoveRanges, invertToKeepRanges } from '../edl-engine'
 import { getConfiguredVoiceId } from './voice-clone'
-import type { TranscriptV1, TranscriptToken, EdlV1, VideoAsset, WordReplacement } from '../../shared/editor-types'
+import type { TranscriptV1, TranscriptToken, EdlV1, VideoAsset, WordReplacement, WordInsertion } from '../../shared/editor-types'
 
 // Default voice ID (Sarah) - used as fallback when no cloned voice configured
 const DEFAULT_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'
@@ -423,6 +423,13 @@ interface ReplacementChunk {
   target_duration_ms: number
 }
 
+interface InsertionChunk {
+  insertion: WordInsertion
+  audioPath: string
+  synth_duration_ms: number
+  insert_after_ms: number  // Position in original timeline where this inserts
+}
+
 /**
  * Extract audio from video and apply DSP filters
  */
@@ -530,6 +537,101 @@ async function synthesizeReplacementChunks(
 }
 
 /**
+ * Synthesize insertion text (new audio that creates new time)
+ */
+async function synthesizeInsertionChunks(
+  insertions: WordInsertion[],
+  tokens: TranscriptToken[],
+  voiceId: string,
+  workDir: string,
+  referenceAudioPath: string
+): Promise<InsertionChunk[]> {
+  const chunks: InsertionChunk[] = []
+  const tokenMap = new Map(tokens.map(t => [t.token_id, t]))
+
+  for (let i = 0; i < insertions.length; i++) {
+    const ins = insertions[i]
+
+    // Determine insert position (after which token's end_ms)
+    let insert_after_ms = 0
+    if (ins.after_token_id) {
+      const afterToken = tokenMap.get(ins.after_token_id)
+      if (afterToken) {
+        insert_after_ms = afterToken.end_ms
+      }
+    }
+
+    console.log(`[hybrid] Synth insertion ${i + 1}/${insertions.length}: "${ins.text}" after ${insert_after_ms}ms`)
+
+    // Synthesize the insertion text
+    const rawPath = path.join(workDir, `ins-${i}-raw.mp3`)
+    const synthPath = await synthesizeWithElevenLabs(ins.text, voiceId, rawPath)
+    const synth_duration_ms = await probeAudioDuration(synthPath)
+
+    // Level matching
+    const refVolume = await probeVolume(referenceAudioPath)
+    const synthVolume = await probeVolume(synthPath)
+    const adjustment = refVolume - synthVolume
+
+    const fittedPath = path.join(workDir, `ins-${i}-fitted.wav`)
+    await adjustVolume(synthPath, fittedPath, adjustment)
+
+    chunks.push({
+      insertion: ins,
+      audioPath: fittedPath,
+      synth_duration_ms,
+      insert_after_ms
+    })
+  }
+
+  return chunks
+}
+
+/**
+ * Extract a single frame as an image (for freeze frame)
+ */
+async function extractFrame(
+  videoPath: string,
+  timeMs: number,
+  outputPath: string
+): Promise<void> {
+  await runFFmpegCommand([
+    '-y',
+    '-ss', (timeMs / 1000).toString(),
+    '-i', videoPath,
+    '-vframes', '1',
+    '-q:v', '2',
+    outputPath
+  ])
+}
+
+/**
+ * Create a freeze frame video segment with audio
+ */
+async function createFreezeFrameSegment(
+  imagePath: string,
+  audioPath: string,
+  durationMs: number,
+  outputPath: string
+): Promise<void> {
+  await runFFmpegCommand([
+    '-y',
+    '-loop', '1',
+    '-i', imagePath,
+    '-i', audioPath,
+    '-c:v', 'libx264',
+    '-preset', 'fast',
+    '-crf', '23',
+    '-t', (durationMs / 1000).toString(),
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-shortest',
+    outputPath
+  ])
+}
+
+/**
  * Build synth patches track - silence with synth chunks at replacement positions
  */
 async function buildSynthPatchesTrack(
@@ -620,12 +722,14 @@ async function mixDspAndSynth(
 /**
  * Main hybrid synthesis pipeline
  * Creates preview with DSP-processed audio + synthesized replacement patches
+ * Handles insertions by creating freeze-frame segments
  */
 export async function synthesizeHybridTrack(
   videoAsset: VideoAsset,
   edl: EdlV1,
   dspFilterChain: string | null,
-  workDir: string
+  workDir: string,
+  transcript?: TranscriptV1  // Optional for backwards compatibility
 ): Promise<SynthesisReport> {
   // Create work directory
   if (!fs.existsSync(workDir)) {
@@ -674,8 +778,14 @@ export async function synthesizeHybridTrack(
     console.log(`[hybrid]   ${i}: Audio before replacement should be preserved until ${safeStart}ms (${bufferBefore}ms buffer)`)
   })
 
+  const insertions = edl.insertions || []
+
   const voiceId = resolveVoiceId()
   console.log(`[hybrid] voiceId: ${voiceId}`)
+  console.log('[hybrid] Insertions:', insertions.length)
+  insertions.forEach((ins, i) => {
+    console.log(`[hybrid]   ${i}: "${ins.text}" after token ${ins.after_token_id || '(start)'}`)
+  })
 
   // Step 1: Extract audio and apply DSP
   console.log('[hybrid] Step 1: Extracting audio with DSP...')
@@ -685,6 +795,25 @@ export async function synthesizeHybridTrack(
   // Step 2: Synthesize replacement chunks FIRST (to know actual duration)
   console.log('[hybrid] Step 2: Synthesizing replacement words...')
   const synthChunks = await synthesizeReplacementChunks(replacements, voiceId, workDir, dspFullPath)
+
+  // Step 2b: Synthesize insertion chunks (these create NEW time)
+  let insertionChunks: InsertionChunk[] = []
+  if (insertions.length > 0 && transcript) {
+    console.log('[hybrid] Step 2b: Synthesizing insertions...')
+    insertionChunks = await synthesizeInsertionChunks(
+      insertions,
+      transcript.tokens,
+      voiceId,
+      workDir,
+      dspFullPath
+    )
+    console.log(`[hybrid] Synthesized ${insertionChunks.length} insertions`)
+    insertionChunks.forEach((ic, i) => {
+      console.log(`[hybrid]   ${i}: "${ic.insertion.text}" at ${ic.insert_after_ms}ms, duration ${ic.synth_duration_ms}ms`)
+    })
+  } else if (insertions.length > 0) {
+    console.log('[hybrid] Step 2b: SKIPPED - no transcript provided for insertions')
+  }
 
   // Step 3: Silence remove_ranges AND full synth regions (including overflow)
   const SYNTH_START_BUFFER_MS = 50 // Must match buildSynthPatchesTrack
@@ -775,36 +904,136 @@ export async function synthesizeHybridTrack(
   }
 
   const segmentPaths: string[] = []
+  let segmentCounter = 0
 
+  // Sort insertions by position
+  const sortedInsertions = [...insertionChunks].sort((a, b) => a.insert_after_ms - b.insert_after_ms)
+
+  // Build segments: for each keep_range, check if insertions fall within it
   for (let i = 0; i < keepRanges.length; i++) {
     const range = keepRanges[i]
-    const segmentPath = path.join(segmentsDir, `segment-${i}.mp4`)
-    const start_sec = range.start_ms / 1000
-    const duration_sec = (range.end_ms - range.start_ms) / 1000
 
-    console.log(`[hybrid] Extracting segment ${i + 1}/${keepRanges.length}: ${start_sec.toFixed(2)}s - ${(start_sec + duration_sec).toFixed(2)}s`)
+    // Find insertions that fall within or at the boundaries of this range
+    const rangeInsertions = sortedInsertions.filter(
+      ins => ins.insert_after_ms >= range.start_ms && ins.insert_after_ms <= range.end_ms
+    )
 
-    // Extract video segment with corresponding hybrid audio
-    await runFFmpegCommand([
-      '-y',
-      '-ss', start_sec.toString(),
-      '-t', duration_sec.toString(),
-      '-i', videoAsset.file_path,
-      '-ss', start_sec.toString(),
-      '-t', duration_sec.toString(),
-      '-i', hybridAudioPath,
-      '-map', '0:v:0',
-      '-map', '1:a:0',
-      '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '23',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      '-shortest',
-      segmentPath
-    ])
+    if (rangeInsertions.length === 0) {
+      // No insertions in this range - extract normally
+      const segmentPath = path.join(segmentsDir, `segment-${segmentCounter++}.mp4`)
+      const start_sec = range.start_ms / 1000
+      const duration_sec = (range.end_ms - range.start_ms) / 1000
 
-    segmentPaths.push(segmentPath)
+      console.log(`[hybrid] Extracting segment: ${start_sec.toFixed(2)}s - ${(start_sec + duration_sec).toFixed(2)}s`)
+
+      await runFFmpegCommand([
+        '-y',
+        '-ss', start_sec.toString(),
+        '-t', duration_sec.toString(),
+        '-i', videoAsset.file_path,
+        '-ss', start_sec.toString(),
+        '-t', duration_sec.toString(),
+        '-i', hybridAudioPath,
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+        segmentPath
+      ])
+
+      segmentPaths.push(segmentPath)
+    } else {
+      // Split range at insertion points
+      console.log(`[hybrid] Range ${i} has ${rangeInsertions.length} insertions - splitting`)
+
+      let currentStart = range.start_ms
+
+      for (const insertion of rangeInsertions) {
+        // Extract segment from currentStart to insertion point
+        if (insertion.insert_after_ms > currentStart) {
+          const segmentPath = path.join(segmentsDir, `segment-${segmentCounter++}.mp4`)
+          const start_sec = currentStart / 1000
+          const duration_sec = (insertion.insert_after_ms - currentStart) / 1000
+
+          console.log(`[hybrid] Extracting pre-insertion segment: ${start_sec.toFixed(2)}s - ${(start_sec + duration_sec).toFixed(2)}s`)
+
+          await runFFmpegCommand([
+            '-y',
+            '-ss', start_sec.toString(),
+            '-t', duration_sec.toString(),
+            '-i', videoAsset.file_path,
+            '-ss', start_sec.toString(),
+            '-t', duration_sec.toString(),
+            '-i', hybridAudioPath,
+            '-map', '0:v:0',
+            '-map', '1:a:0',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '23',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-shortest',
+            segmentPath
+          ])
+
+          segmentPaths.push(segmentPath)
+        }
+
+        // Create freeze-frame segment for the insertion
+        const freezeFramePath = path.join(segmentsDir, `freeze-${segmentCounter}.jpg`)
+        const insertionSegmentPath = path.join(segmentsDir, `segment-${segmentCounter++}.mp4`)
+
+        console.log(`[hybrid] Creating insertion segment: "${insertion.insertion.text}" (${insertion.synth_duration_ms}ms freeze frame)`)
+
+        // Extract frame at insertion point
+        await extractFrame(videoAsset.file_path, insertion.insert_after_ms, freezeFramePath)
+
+        // Create freeze-frame video with insertion audio
+        await createFreezeFrameSegment(
+          freezeFramePath,
+          insertion.audioPath,
+          insertion.synth_duration_ms,
+          insertionSegmentPath
+        )
+
+        segmentPaths.push(insertionSegmentPath)
+        currentStart = insertion.insert_after_ms
+      }
+
+      // Extract remaining segment after last insertion (if any)
+      if (currentStart < range.end_ms) {
+        const segmentPath = path.join(segmentsDir, `segment-${segmentCounter++}.mp4`)
+        const start_sec = currentStart / 1000
+        const duration_sec = (range.end_ms - currentStart) / 1000
+
+        console.log(`[hybrid] Extracting post-insertion segment: ${start_sec.toFixed(2)}s - ${(start_sec + duration_sec).toFixed(2)}s`)
+
+        await runFFmpegCommand([
+          '-y',
+          '-ss', start_sec.toString(),
+          '-t', duration_sec.toString(),
+          '-i', videoAsset.file_path,
+          '-ss', start_sec.toString(),
+          '-t', duration_sec.toString(),
+          '-i', hybridAudioPath,
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-crf', '23',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-shortest',
+          segmentPath
+        ])
+
+        segmentPaths.push(segmentPath)
+      }
+    }
   }
 
   // Step 7: Concatenate segments

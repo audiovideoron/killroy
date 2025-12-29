@@ -15,9 +15,19 @@
       "Bash(gh issue create:*)",
       "Bash(gh issue edit:*)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__ElevenLabs__text_to_speech",
+      "mcp__ElevenLabs__speech_to_text",
+      "mcp__ElevenLabs__search_voices",
+      "mcp__ElevenLabs__get_voice",
+      "mcp__ElevenLabs__voice_clone",
+      "mcp__ElevenLabs__isolate_audio",
+      "mcp__ElevenLabs__play_audio",
+      "mcp__ElevenLabs__list_models",
+      "mcp__ElevenLabs__check_subscription"
     ],
     "deny": [],
     "ask": []
-  }
+  },
+  "enableAllProjectMcpServers": true
 }

@@ -961,16 +961,16 @@ export function cleanupFFmpegJob(jobId: string): void {
   activeFFmpegJobs.delete(jobId)
   console.log(`[ffmpeg] Cleaned up job ${jobId}, ${activeFFmpegJobs.size} jobs remaining`)
 
-  // Clean up job temp directory (but NOT for preview renders - those need to persist)
-  // Preview files are cleaned by:
-  // 1. Next preview render (creates new temp dir)
+  // Clean up job temp directory (but NOT for playback renders - those need to persist)
+  // Playback files are cleaned by:
+  // 1. Next render (creates new temp dir)
   // 2. App quit
   // 3. Stale cleanup (24h old files)
-  const isPreviewJob = job.phase?.includes('preview')
-  if (job.tempDir && !isPreviewJob) {
+  const needsPlayback = job.phase?.includes('preview') || job.phase?.includes('full-audio')
+  if (job.tempDir && !needsPlayback) {
     cleanupJobTempDir(jobId, job.tempDir)
-  } else if (isPreviewJob) {
-    console.log(`[temp] Preserving preview temp directory for playback: ${job.tempDir}`)
+  } else if (needsPlayback) {
+    console.log(`[temp] Preserving temp directory for playback: ${job.tempDir}`)
   }
 }
 
