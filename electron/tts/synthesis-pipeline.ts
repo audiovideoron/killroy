@@ -5,12 +5,96 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import { synthesizeWithElevenLabs } from './elevenlabs'
 import { probeAudioDuration } from '../media-metadata'
 import { buildEffectiveRemoveRanges, invertToKeepRanges } from '../edl-engine'
 import { getConfiguredVoiceId } from './voice-clone'
 import type { TranscriptV1, TranscriptToken, EdlV1, VideoAsset, WordReplacement, WordInsertion } from '../../shared/editor-types'
+
+/**
+ * Synthesis pipeline FFmpeg job tracking.
+ * Mirrors ffmpeg-manager.ts pattern for lifecycle management.
+ */
+interface SynthesisFFmpegJob {
+  id: string
+  process: ChildProcess
+  startTime: number
+  timeoutHandle: NodeJS.Timeout | null
+}
+
+/**
+ * Registry of active synthesis FFmpeg jobs.
+ * Enables cancellation and cleanup of all spawned processes.
+ */
+const activeSynthesisJobs = new Map<string, SynthesisFFmpegJob>()
+
+/**
+ * Generate unique job ID for synthesis FFmpeg operations.
+ */
+function generateJobId(): string {
+  return `synth-ffmpeg-${Date.now()}-${Math.random().toString(36).substring(7)}`
+}
+
+/**
+ * Register an FFmpeg job for tracking.
+ */
+function registerJob(job: SynthesisFFmpegJob): void {
+  activeSynthesisJobs.set(job.id, job)
+  console.log(`[synthesis-ffmpeg] Registered job ${job.id}, ${activeSynthesisJobs.size} jobs active`)
+}
+
+/**
+ * Clean up a synthesis FFmpeg job: kill process, clear timeout, remove from registry.
+ * Idempotent and safe to call multiple times.
+ */
+function cleanupSynthesisJob(jobId: string): void {
+  const job = activeSynthesisJobs.get(jobId)
+  if (!job) return
+
+  // Clear timeout if exists
+  if (job.timeoutHandle) {
+    clearTimeout(job.timeoutHandle)
+  }
+
+  // Kill process if still running
+  if (job.process && !job.process.killed) {
+    try {
+      job.process.kill('SIGTERM')
+      // Give it a moment, then force kill if needed
+      setTimeout(() => {
+        if (job.process && !job.process.killed) {
+          job.process.kill('SIGKILL')
+        }
+      }, 1000)
+    } catch (err) {
+      console.error('[synthesis-ffmpeg] Failed to kill process:', err)
+    }
+  }
+
+  // Remove from registry
+  activeSynthesisJobs.delete(jobId)
+  console.log(`[synthesis-ffmpeg] Cleaned up job ${jobId}, ${activeSynthesisJobs.size} jobs remaining`)
+}
+
+/**
+ * Get count of active synthesis jobs (for debugging/monitoring).
+ */
+export function getActiveSynthesisJobCount(): number {
+  return activeSynthesisJobs.size
+}
+
+/**
+ * Cancel all active synthesis jobs.
+ * Called during app shutdown or synthesis abort.
+ */
+export function cancelAllSynthesisJobs(): void {
+  console.log(`[synthesis-ffmpeg] Cancelling all ${activeSynthesisJobs.size} synthesis jobs`)
+  const jobIds = Array.from(activeSynthesisJobs.keys())
+  for (const jobId of jobIds) {
+    cleanupSynthesisJob(jobId)
+  }
+}
 
 // Default voice ID (Sarah) - used as fallback when no cloned voice configured
 const DEFAULT_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'
@@ -111,27 +195,66 @@ function buildChunks(
 }
 
 /**
- * Run FFmpeg command
+ * Run FFmpeg command with job tracking.
+ * All spawned FFmpeg processes are registered for lifecycle management.
+ *
+ * @param args FFmpeg command-line arguments
+ * @param timeoutMs Timeout in milliseconds (default: 5 minutes)
  */
-function runFFmpegCommand(args: string[]): Promise<void> {
+function runFFmpegCommand(args: string[], timeoutMs: number = 5 * 60 * 1000): Promise<void> {
   return new Promise((resolve, reject) => {
+    const jobId = generateJobId()
     const proc = spawn('ffmpeg', args)
     let stderr = ''
+    let resolved = false
+
+    // Helper to resolve/reject only once
+    const resolveOnce = (): void => {
+      if (resolved) return
+      resolved = true
+      cleanupSynthesisJob(jobId)
+      resolve()
+    }
+
+    const rejectOnce = (error: Error): void => {
+      if (resolved) return
+      resolved = true
+      cleanupSynthesisJob(jobId)
+      reject(error)
+    }
+
+    // Set up timeout
+    const timeoutHandle = setTimeout(() => {
+      console.error(`[synthesis-ffmpeg] Job ${jobId} timed out after ${timeoutMs}ms`)
+      rejectOnce(new Error(`FFmpeg operation timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
+
+    // Register job for tracking
+    const job: SynthesisFFmpegJob = {
+      id: jobId,
+      process: proc,
+      startTime: Date.now(),
+      timeoutHandle
+    }
+    registerJob(job)
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString()
     })
 
     proc.on('close', (code) => {
+      const duration = Date.now() - job.startTime
+      console.log(`[synthesis-ffmpeg] Job ${jobId} exited with code ${code} after ${duration}ms`)
+
       if (code !== 0) {
-        reject(new Error(`FFmpeg failed: ${stderr}`))
+        rejectOnce(new Error(`FFmpeg failed: ${stderr}`))
       } else {
-        resolve()
+        resolveOnce()
       }
     })
 
     proc.on('error', (err) => {
-      reject(new Error(`Failed to spawn ffmpeg: ${err.message}`))
+      rejectOnce(new Error(`Failed to spawn ffmpeg: ${err.message}`))
     })
   })
 }
@@ -194,11 +317,22 @@ async function fitAudioToDuration(
 }
 
 /**
- * Probe mean volume of an audio file or region
+ * Probe mean volume of an audio file or region with job tracking.
  * Returns mean_volume in dB
+ *
+ * @param audioPath Path to audio file
+ * @param startMs Optional start position in milliseconds
+ * @param durationMs Optional duration in milliseconds
+ * @param timeoutMs Timeout in milliseconds (default: 30 seconds)
  */
-async function probeVolume(audioPath: string, startMs?: number, durationMs?: number): Promise<number> {
+async function probeVolume(
+  audioPath: string,
+  startMs?: number,
+  durationMs?: number,
+  timeoutMs: number = 30000
+): Promise<number> {
   return new Promise((resolve, reject) => {
+    const jobId = generateJobId()
     const args: string[] = ['-y']
 
     // If seeking to a specific region, extract it first for accurate measurement
@@ -211,24 +345,58 @@ async function probeVolume(audioPath: string, startMs?: number, durationMs?: num
 
     const proc = spawn('ffmpeg', args)
     let stderr = ''
+    let resolved = false
+
+    // Helper to resolve/reject only once
+    const resolveOnce = (value: number): void => {
+      if (resolved) return
+      resolved = true
+      cleanupSynthesisJob(jobId)
+      resolve(value)
+    }
+
+    const rejectOnce = (error: Error): void => {
+      if (resolved) return
+      resolved = true
+      cleanupSynthesisJob(jobId)
+      reject(error)
+    }
+
+    // Set up timeout
+    const timeoutHandle = setTimeout(() => {
+      console.error(`[synthesis-ffmpeg] Volume probe ${jobId} timed out after ${timeoutMs}ms`)
+      rejectOnce(new Error(`Volume probe timed out after ${timeoutMs / 1000}s`))
+    }, timeoutMs)
+
+    // Register job for tracking
+    const job: SynthesisFFmpegJob = {
+      id: jobId,
+      process: proc,
+      startTime: Date.now(),
+      timeoutHandle
+    }
+    registerJob(job)
 
     proc.stderr.on('data', (data) => {
       stderr += data.toString()
     })
 
     proc.on('close', (code) => {
+      const duration = Date.now() - job.startTime
+      console.log(`[synthesis-ffmpeg] Volume probe ${jobId} exited with code ${code} after ${duration}ms`)
+
       // Parse mean_volume from stderr
       const match = stderr.match(/mean_volume:\s*(-?\d+\.?\d*)\s*dB/)
       if (match) {
-        resolve(parseFloat(match[1]))
+        resolveOnce(parseFloat(match[1]))
       } else {
         // If no volume detected (silence), return very low value
-        resolve(-91.0)
+        resolveOnce(-91.0)
       }
     })
 
     proc.on('error', (err) => {
-      reject(new Error(`Failed to probe volume: ${err.message}`))
+      rejectOnce(new Error(`Failed to probe volume: ${err.message}`))
     })
   })
 }
