@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { RenderOptions, RenderResult, JobProgressEvent, QuietCandidatesResult } from '../shared/types'
+import type { RenderOptions, RenderResult, JobProgressEvent, QuietCandidatesResult, ProtocolErrorEvent } from '../shared/types'
 import type { TranscriptV1, EdlV1 } from '../shared/editor-types'
 
 // Re-export types for backwards compatibility
@@ -13,7 +13,8 @@ export type {
   JobProgressEvent,
   JobStatus,
   QuietCandidate,
-  QuietCandidatesResult
+  QuietCandidatesResult,
+  ProtocolErrorEvent
 } from '../shared/types'
 
 export type {
@@ -67,5 +68,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('clone-voice', filePath),
 
   cancelRender: (jobId: string): Promise<{ success: boolean; message: string }> =>
-    ipcRenderer.invoke('cancel-render', jobId)
+    ipcRenderer.invoke('cancel-render', jobId),
+
+  // Protocol error event listener
+  onProtocolError: (callback: (event: ProtocolErrorEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: ProtocolErrorEvent) => callback(data)
+    ipcRenderer.on('protocol:error', listener)
+    // Return cleanup function
+    return () => {
+      ipcRenderer.removeListener('protocol:error', listener)
+    }
+  }
 })

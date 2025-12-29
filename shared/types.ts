@@ -164,3 +164,12 @@ export const QUIET_DETECTION_CONFIG = {
   MIN_DURATION_SEC: 0.5,       // Minimum quiet region duration in seconds
   MAX_CANDIDATES: 5,           // Maximum candidates to return
 } as const
+
+/**
+ * Protocol error event emitted when file serving fails.
+ */
+export interface ProtocolErrorEvent {
+  url: string
+  statusCode: number
+  message: string
+}

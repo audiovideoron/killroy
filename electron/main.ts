@@ -100,11 +100,15 @@ app.whenReady().then(() => {
   const asrBackend = process.env.ASR_BACKEND || 'elevenlabs'
   console.log(`[ASR] Backend: ${asrBackend}`)
 
+  // Create window first so we can pass it to the protocol handler
+  createWindow()
+
   // Handle appfile:// protocol with Range request support for video playback
   // Security: Only serves files that have been explicitly approved via the allowlist
-  setupAppfileProtocolHandler()
-
-  createWindow()
+  // Note: mainWindow is guaranteed to be set after createWindow()
+  if (mainWindow) {
+    setupAppfileProtocolHandler(mainWindow)
+  }
 })
 
 app.on('window-all-closed', () => {

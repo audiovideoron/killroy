@@ -1,7 +1,11 @@
-import { protocol } from 'electron'
+import { protocol, BrowserWindow } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import { validateFilePath } from './path-validation'
+import type { ProtocolErrorEvent } from '../shared/types'
+
+// Reference to main window for sending error events
+let mainWindowRef: BrowserWindow | null = null
 
 /**
  * Register custom appfile:// protocol scheme as privileged.
@@ -20,10 +24,23 @@ export function registerAppfileScheme(): void {
 }
 
 /**
+ * Emit protocol error event to renderer.
+ */
+function emitProtocolError(url: string, statusCode: number, message: string): void {
+  if (mainWindowRef && !mainWindowRef.isDestroyed()) {
+    const event: ProtocolErrorEvent = { url, statusCode, message }
+    mainWindowRef.webContents.send('protocol:error', event)
+    console.log('[appfile] Emitted protocol:error event:', event)
+  }
+}
+
+/**
  * Handle appfile:// protocol with Range request support for video playback.
  * Security: Only serves files that have been explicitly approved via the allowlist.
+ * @param mainWindow Main browser window to send error events to
  */
-export function setupAppfileProtocolHandler(): void {
+export function setupAppfileProtocolHandler(mainWindow: BrowserWindow): void {
+  mainWindowRef = mainWindow
   protocol.handle('appfile', (request) => {
     try {
       // appfile:///absolute/path?v=123 -> /absolute/path
@@ -39,12 +56,14 @@ export function setupAppfileProtocolHandler(): void {
       })
       if (!validatedPath) {
         console.error('[appfile] Blocked unapproved path:', filePath)
+        emitProtocolError(request.url, 403, `Blocked unapproved path: ${filePath}`)
         return new Response('Forbidden', { status: 403 })
       }
 
       // Check file exists
       if (!fs.existsSync(validatedPath)) {
         console.error('[appfile] File not found:', validatedPath)
+        emitProtocolError(request.url, 404, `File not found: ${validatedPath}`)
         return new Response('Not Found', { status: 404 })
       }
 
@@ -104,7 +123,9 @@ export function setupAppfileProtocolHandler(): void {
         })
       }
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
       console.error('[appfile] Protocol error:', err)
+      emitProtocolError(request.url, 500, `Internal error: ${errorMessage}`)
       return new Response('Internal Server Error', { status: 500 })
     }
   })

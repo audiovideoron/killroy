@@ -9,6 +9,7 @@ import type {
   JobProgressEvent,
   LoudnessParams,
   NoiseSamplingParams,
+  ProtocolErrorEvent,
   QuietCandidate,
   QuietCandidatesResult,
   RenderOptions,
@@ -37,6 +38,7 @@ declare global {
       computePendingRemovals: (filePath: string, edl: EdlV1) => Promise<{ ranges: Array<{ start_ms: number; end_ms: number }>; total_removed_ms: number; duration_ms: number }>
       synthesizeVoiceTest: (filePath: string, transcript: TranscriptV1, edl: EdlV1) => Promise<{ success: boolean; outputPath?: string; error?: string; report?: { chunks: number; total_target_ms: number; total_synth_ms: number; tempo_adjustments: number } }>
       cloneVoice: (filePath: string) => Promise<{ success: boolean; voice_id?: string; voice_name?: string; error?: string }>
+      onProtocolError: (callback: (event: ProtocolErrorEvent) => void) => () => void
     }
   }
 }
