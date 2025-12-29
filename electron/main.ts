@@ -8,7 +8,8 @@ import { extractAudioForASR, cleanupAudioFile } from './audio-extraction'
 import { getTranscriber } from './asr-adapter'
 import { renderFinal } from './final-render'
 import { buildEffectiveRemoveRanges } from './edl-engine'
-import { synthesizeVoiceTrack } from './tts/synthesis-pipeline'
+import { synthesizeVoiceTrack, synthesizeHybridTrack, renderDeleteOnlyPreview } from './tts/synthesis-pipeline'
+import { cloneVoiceFromVideo, loadVoiceIdFromEnvrc } from './tts/voice-clone'
 import {
   buildFullFilterChain,
   buildEQFilter,
@@ -40,6 +41,13 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 
+// Cache for synthesized audio track (keyed by video file path)
+// Stores the path to synthesized-track.wav for use during export
+const synthesizedAudioCache: Map<string, string> = new Map()
+
+// Cache for synthesized preview video (keyed by video file path)
+// Stores the path to preview-synthesized.mp4 for Preview button
+const synthesizedPreviewCache: Map<string, string> = new Map()
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -70,21 +78,19 @@ app.whenReady().then(() => {
   // Clean up stale job directories from previous runs
   cleanupStaleJobDirs()
 
+  // Load voice ID from .envrc (Electron doesn't source shell scripts)
+  const projectRoot = app.isPackaged
+    ? path.dirname(app.getPath('exe'))
+    : path.resolve(__dirname, '..')
+  loadVoiceIdFromEnvrc(projectRoot)
+
+  // Voice ID diagnostic at startup
+  const voiceId = process.env.ELEVENLABS_VOICE_ID
+  console.log('[startup] ELEVENLABS_VOICE_ID:', voiceId || '(unset - will use default Sarah voice)')
+
   // ASR configuration diagnostic
-  const asrBackend = process.env.ASR_BACKEND || 'mock'
+  const asrBackend = process.env.ASR_BACKEND || 'elevenlabs'
   console.log(`[ASR] Backend: ${asrBackend}`)
-  if (asrBackend === 'whispercpp') {
-    const modelPath = process.env.WHISPER_MODEL || ''
-    const binPath = process.env.WHISPER_CPP_BIN || '/opt/homebrew/bin/whisper-cli'
-    const modelExists = modelPath && fs.existsSync(modelPath)
-    const binExists = fs.existsSync(binPath)
-    console.log(`[ASR] Model configured: ${modelExists ? 'YES' : 'NO'}`)
-    console.log(`[ASR] Binary configured: ${binExists ? 'YES' : 'NO'}`)
-    if (!modelExists || !binExists) {
-      console.warn('[ASR] ⚠️  Whisper configuration incomplete — transcription will fail')
-      console.warn('[ASR] Run: npm run asr:check')
-    }
-  }
 
   // Handle appfile:// protocol with Range request support for video playback
   // Security: Only serves files that have been explicitly approved via the allowlist
@@ -144,6 +150,25 @@ ipcMain.handle('select-file', async () => {
   return selectedPath
 })
 
+// Auto-load file for dev workflow - set DEV_AUTO_LOAD_FILE env var
+ipcMain.handle('get-auto-load-file', () => {
+  const autoLoadPath = process.env.DEV_AUTO_LOAD_FILE
+  if (!autoLoadPath) return null
+
+  // Resolve relative paths to app directory
+  const resolvedPath = path.isAbsolute(autoLoadPath)
+    ? autoLoadPath
+    : path.resolve(app.getAppPath(), autoLoadPath)
+
+  if (fs.existsSync(resolvedPath)) {
+    console.log('[dev] Auto-loading file:', resolvedPath)
+    approveFilePath(resolvedPath)
+    return resolvedPath
+  }
+  console.log('[dev] Auto-load file not found:', resolvedPath)
+  return null
+})
+
 ipcMain.handle('save-dialog', async (_event, defaultPath: string) => {
   const result = await dialog.showSaveDialog(mainWindow!, {
     defaultPath,
@@ -170,6 +195,22 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
         error: `Invalid input file: ${validation.message}`
       }
     }
+
+    // Check for cached synthesized preview - if exists and on disk, use it
+    const synthesizedPreviewPath = synthesizedPreviewCache.get(inputPath)
+    if (synthesizedPreviewPath && fs.existsSync(synthesizedPreviewPath)) {
+      console.log('[preview] mode=SYNTHESIZED filePath=' + inputPath + ' outPath=' + synthesizedPreviewPath)
+      approveFilePath(synthesizedPreviewPath)
+      return {
+        success: true,
+        originalPath: synthesizedPreviewPath,  // Both point to synth for unified playback
+        processedPath: synthesizedPreviewPath,
+        renderId: Date.now(),
+        jobId: 'synth-cached'
+      }
+    }
+
+    console.log('[preview] mode=DSP filePath=' + inputPath)
 
     // Approve input file for appfile:// protocol access
     // (Should already be approved from select-file, but ensure it here for defense in depth)
@@ -220,8 +261,31 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
       }
     }
 
+    // Check if source is HEVC - Chromium can't play HEVC, must re-encode
+    const videoStream = metadata.streams.find(s => s.codec_type === 'video')
+    const isHEVC = videoStream?.codec_name === 'hevc' || videoStream?.codec_name === 'h265'
+    if (isHEVC) {
+      console.log('[render-preview] Source is HEVC - will re-encode to H.264 for Chromium playback')
+    }
+
     // Render original preview with automatic copy → re-encode fallback
-    const originalAttempts: RenderAttempt[] = [
+    // Skip COPY for HEVC since Chromium can't play it
+    const originalAttempts: RenderAttempt[] = isHEVC ? [
+      {
+        name: 'REENCODE',
+        args: [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          originalOutput
+        ]
+      }
+    ] : [
       {
         name: 'COPY',
         args: [
@@ -268,7 +332,34 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
     )
 
     // Build attempts with automatic copy → re-encode fallback
-    const processedAttempts: RenderAttempt[] = [
+    // Skip COPY for HEVC since Chromium can't play it
+    const processedAttempts: RenderAttempt[] = isHEVC ? [
+      {
+        name: 'REENCODE',
+        args: filterChain ? [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-af', filterChain,
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ] : [
+          '-y',
+          '-ss', startTime.toString(),
+          '-t', duration.toString(),
+          '-i', inputPath,
+          '-c:v', 'libx264',
+          '-preset', 'fast',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          processedOutput
+        ]
+      }
+    ] : [
       {
         name: 'COPY',
         args: filterChain ? [
@@ -357,7 +448,8 @@ ipcMain.handle('render-preview', async (_event, options: RenderOptions) => {
 ipcMain.handle('get-file-url', (_event, filePath: string) => {
   // Use custom appfile:// protocol to bypass file:// restrictions in dev mode
   const url = `appfile://${filePath}`
-  console.log('[get-file-url] Returning URL:', url)
+  console.log('[get-file-url] filesystem path:', filePath)
+  console.log('[get-file-url] generated URL:', url)
   return url
 })
 
@@ -536,11 +628,18 @@ ipcMain.handle('render-final', async (_event, filePath: string, edl: EdlV1, outp
     // 1. Extract video metadata
     const videoAsset = await extractVideoMetadata(filePath)
 
-    // 2. Render final video
+    // 2. Check for cached synthesized audio
+    const synthesizedAudioPath = synthesizedAudioCache.get(filePath)
+    console.log('[tts:export] filePath:', filePath)
+    console.log('[tts:export] synthesizedAudioPath:', synthesizedAudioPath || '(none - using original audio)')
+    console.log('[tts:export] mode:', synthesizedAudioPath ? 'MUXING_SYNTH_AUDIO' : 'ORIGINAL_AUDIO')
+
+    // 3. Render final video
     const report = await renderFinal({
       videoAsset,
       edl,
-      outputPath
+      outputPath,
+      synthesizedAudioPath
     })
 
     return {
@@ -583,10 +682,62 @@ ipcMain.handle('synthesize-voice-test', async (_event, filePath: string, transcr
     // 2. Create work directory
     const workDir = path.join(app.getPath('temp'), `synth-${Date.now()}`)
 
-    // 3. Run synthesis pipeline
-    const report = await synthesizeVoiceTrack(videoAsset, transcript, edl, workDir)
+    // 3. Choose mode based on edits
+    const hasReplacements = edl.replacements && edl.replacements.length > 0
+    const hasInsertions = edl.insertions && edl.insertions.length > 0
+    const hasDeletions = edl.remove_ranges && edl.remove_ranges.length > 0
+
+    let report
+    let outputPath: string
+
+    if (hasReplacements || hasInsertions) {
+      // Hybrid mode: DSP audio + synth patches for replacements + insertions
+      console.log('[synthesize-voice-test] Mode: HYBRID (DSP + synth patches)')
+      console.log('[synthesize-voice-test] Replacements:', edl.replacements?.length ?? 0)
+      console.log('[synthesize-voice-test] Insertions:', edl.insertions?.length ?? 0)
+      console.log('[synthesize-voice-test] Remove ranges:', edl.remove_ranges.length)
+      // Pass null for DSP filter chain - use original audio for non-replaced regions
+      // TODO: Pass actual DSP settings from frontend for full DSP+synth hybrid
+      const hybridReport = await synthesizeHybridTrack(videoAsset, edl, null, workDir, transcript)
+      outputPath = hybridReport.outputPath
+      report = hybridReport
+    } else if (hasDeletions) {
+      // Delete-only mode: cut video+audio, no TTS
+      console.log('[synthesize-voice-test] Mode: DELETE-ONLY (no TTS)')
+      console.log('[synthesize-voice-test] Remove ranges:', edl.remove_ranges.length)
+      // Pass null for DSP filter chain - use original audio
+      // TODO: Pass actual DSP settings from frontend
+      const deleteReport = await renderDeleteOnlyPreview(videoAsset, edl, null, workDir)
+      outputPath = deleteReport.outputPath
+      report = {
+        outputPath: deleteReport.outputPath,
+        audioTrackPath: deleteReport.outputPath, // No separate audio track for delete-only
+        chunks: deleteReport.segments,
+        total_target_ms: deleteReport.edited_duration_ms,
+        total_synth_ms: 0,
+        tempo_adjustments: 0
+      }
+    } else {
+      // Full synthesis mode: regenerate entire transcript (no edits)
+      console.log('[synthesize-voice-test] Mode: FULL SYNTHESIS')
+      const synthReport = await synthesizeVoiceTrack(videoAsset, transcript, edl, workDir)
+      outputPath = synthReport.outputPath
+      report = synthReport
+    }
 
     console.log('[synthesize-voice-test] Complete:', report)
+
+    // Cache synthesized audio track for export
+    synthesizedAudioCache.set(filePath, report.audioTrackPath)
+    console.log('[synthesize-voice-test] Cached audio track for export:', report.audioTrackPath)
+
+    // Cache synthesized preview video for Preview button
+    synthesizedPreviewCache.set(filePath, report.outputPath)
+    console.log('[synthesize-voice-test] Cached preview video:', report.outputPath)
+
+    // Approve synthesized output for appfile:// protocol access
+    approveFilePath(report.outputPath)
+    console.log('[synthesize-voice-test] Approved path for appfile://', report.outputPath)
 
     return {
       success: true,
@@ -622,5 +773,30 @@ ipcMain.handle('detect-quiet-candidates', async (_event, filePath: string) => {
   } catch (err) {
     console.error('[detect-quiet-candidates] Error:', err)
     return { candidates: [] }
+  }
+})
+
+// Clone voice from loaded video
+ipcMain.handle('clone-voice', async (_event, filePath: string) => {
+  try {
+    // Validate input path
+    const validation = validateMediaPath(filePath)
+    if (!validation.ok) {
+      return { success: false, error: validation.message }
+    }
+
+    // Get project root (where .envrc lives)
+    const projectRoot = app.isPackaged
+      ? path.dirname(app.getPath('exe'))
+      : path.resolve(__dirname, '..')
+
+    const result = await cloneVoiceFromVideo(filePath, projectRoot)
+    return result
+  } catch (err) {
+    console.error('[clone-voice] Error:', err)
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err)
+    }
   }
 })
