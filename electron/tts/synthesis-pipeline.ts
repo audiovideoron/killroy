@@ -551,21 +551,25 @@ async function buildSynthPatchesTrack(
   const parts: string[] = []
   let currentTime = 0
 
-  // Small buffer before synth starts - protects preceding word's tail
+  // Buffer before synth starts - protects preceding word's tail
   const SYNTH_START_BUFFER_MS = 50
 
+  console.log('[synth-track] Building synth patches track...')
   for (let i = 0; i < sorted.length; i++) {
     const chunk = sorted[i]
     const chunkStart = chunk.replacement.start_ms + SYNTH_START_BUFFER_MS
 
     // Silence before this chunk
     if (chunkStart > currentTime) {
+      const silenceDuration = chunkStart - currentTime
       const silencePath = path.join(workDir, `synth-silence-${i}.wav`)
-      await generateSilence(silencePath, chunkStart - currentTime)
+      console.log(`[synth-track] Adding silence: ${currentTime}ms - ${chunkStart}ms (${silenceDuration}ms)`)
+      await generateSilence(silencePath, silenceDuration)
       parts.push(silencePath)
     }
 
     // The synth chunk
+    console.log(`[synth-track] Adding synth chunk: ${chunkStart}ms - ${chunkStart + chunk.synth_duration_ms}ms (${chunk.synth_duration_ms}ms)`)
     parts.push(chunk.fittedPath)
     // After synth ends, current time is start + buffer + synth duration
     currentTime = chunkStart + chunk.synth_duration_ms
@@ -731,6 +735,25 @@ export async function synthesizeHybridTrack(
       }
     }
   }
+
+  // Merge overlapping keep ranges (can happen when synth expansion overlaps with next range)
+  keepRanges.sort((a, b) => a.start_ms - b.start_ms)
+  const mergedRanges: Array<{ start_ms: number; end_ms: number }> = []
+  for (const range of keepRanges) {
+    if (mergedRanges.length === 0) {
+      mergedRanges.push({ ...range })
+    } else {
+      const last = mergedRanges[mergedRanges.length - 1]
+      // If this range overlaps or is adjacent to the last one, merge them
+      if (range.start_ms <= last.end_ms) {
+        console.log(`[hybrid] Merging overlapping keep ranges: ${last.start_ms}-${last.end_ms}ms + ${range.start_ms}-${range.end_ms}ms`)
+        last.end_ms = Math.max(last.end_ms, range.end_ms)
+      } else {
+        mergedRanges.push({ ...range })
+      }
+    }
+  }
+  keepRanges = mergedRanges
 
   console.log('[hybrid] === KEEP RANGES (after expansion) ===')
   keepRanges.forEach((r, i) => {

@@ -1141,6 +1141,120 @@ describe('Combined Remove + Replacement', () => {
     expect(wellWord).toBeDefined()
   }, 180000)
 
+  it('should preserve words before replacement when remove follows', async () => {
+    // THIS TEST MATCHES USER BUG REPORT:
+    // Replace "one" at 17620ms with "one on wall power"
+    // Remove range starting at 18040ms (immediately after)
+    // "the other" at 16500-17600ms should NOT be eaten
+
+    if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
+      return
+    }
+
+    const originalAudioPath = path.join(WORK_DIR, 'original-audio.wav')
+    if (!fs.existsSync(originalAudioPath)) {
+      extractAudio(TEST_VIDEO, originalAudioPath)
+    }
+    const originalTranscript = await transcribeAudio(originalAudioPath)
+
+    // Find the words: "the other one not"
+    const theWord = findWordNear(originalTranscript, 'the', 16500)
+    const otherWord = findWordNear(originalTranscript, 'other', 17000)
+    const oneWord = findWordNear(originalTranscript, 'one', 17600)
+    const notWord = findWordNear(originalTranscript, 'not', 18100)
+
+    if (!theWord || !otherWord || !oneWord || !notWord) {
+      console.log('Target words not found:', { theWord, otherWord, oneWord, notWord })
+      return
+    }
+
+    console.log(`"the" at ${theWord.start_ms}ms`)
+    console.log(`"other" at ${otherWord.start_ms}ms - ${otherWord.end_ms}ms`)
+    console.log(`"one" at ${oneWord.start_ms}ms - ${oneWord.end_ms}ms`)
+    console.log(`"not" at ${notWord.start_ms}ms`)
+
+    // Replace "one" with long phrase, remove starting right after
+    const replacement = {
+      tokenId: uuidv4(),
+      originalText: 'one',
+      replacementText: 'one on wall power',
+      start_ms: oneWord.start_ms,
+      end_ms: oneWord.end_ms
+    }
+
+    // Remove from end of "one" through "not" (simulating user's remove range)
+    const removeRange = { start_ms: oneWord.end_ms, end_ms: notWord.end_ms }
+
+    console.log(`\nReplace: "one" at ${oneWord.start_ms}ms with "one on wall power"`)
+    console.log(`Remove: ${removeRange.start_ms}ms - ${removeRange.end_ms}ms`)
+
+    const videoAsset = buildVideoAsset()
+    const edl = buildEdlWithRemovesAndReplacements(videoAsset.video_id, [removeRange], [replacement])
+
+    const testWorkDir = path.join(WORK_DIR, `combo-remove-after-repl-${Date.now()}`)
+    const report = await synthesizeHybridTrack(videoAsset, edl, null, testWorkDir)
+
+    console.log(`\nOutput: ${report.outputPath}`)
+    console.log(`Synth duration: ${report.total_synth_ms}ms (original word: ${oneWord.end_ms - oneWord.start_ms}ms)`)
+
+    // Transcribe output
+    const outputAudioPath = path.join(testWorkDir, 'output-audio.wav')
+    extractAudio(report.outputPath, outputAudioPath)
+    const outputTranscript = await transcribeAudio(outputAudioPath)
+
+    console.log('\n=== OUTPUT TRANSCRIPT (12-20s region) ===')
+    outputTranscript
+      .filter(w => w.start_ms > 12000 && w.start_ms < 20000)
+      .forEach(w => console.log(`${w.start_ms}ms: "${w.text}"`))
+
+    // CRITICAL: Audio at "the other" position MUST be preserved
+    // We verify by comparing audio bytes (not ASR, which is context-sensitive)
+    console.log('\n=== CRITICAL: AUDIO PRESERVATION CHECK ===')
+    const hybridAudioPath = path.join(testWorkDir, 'hybrid-audio.wav')
+    const dspFullPath = path.join(testWorkDir, 'dsp-full.wav')
+
+    // Extract the "the other" region from both files
+    const theOtherStart = theWord.start_ms / 1000
+    const theOtherDuration = (otherWord.end_ms - theWord.start_ms) / 1000
+
+    const hybridRegionPath = path.join(testWorkDir, 'verify-hybrid-region.wav')
+    const originalRegionPath = path.join(testWorkDir, 'verify-original-region.wav')
+
+    // Extract regions for comparison
+    execSync(`ffmpeg -y -i "${hybridAudioPath}" -ss ${theOtherStart} -t ${theOtherDuration} "${hybridRegionPath}"`, { stdio: 'pipe' })
+    execSync(`ffmpeg -y -i "${dspFullPath}" -ss ${theOtherStart} -t ${theOtherDuration} "${originalRegionPath}"`, { stdio: 'pipe' })
+
+    // Compare file contents (should be identical if audio is preserved)
+    const hybridBytes = fs.readFileSync(hybridRegionPath)
+    const originalBytes = fs.readFileSync(originalRegionPath)
+    const bytesMatch = hybridBytes.equals(originalBytes)
+
+    console.log(`Audio at "the other" position (${theOtherStart}s-${theOtherStart + theOtherDuration}s):`)
+    console.log(`  Hybrid bytes: ${hybridBytes.length}`)
+    console.log(`  Original bytes: ${originalBytes.length}`)
+    console.log(`  Bytes match: ${bytesMatch ? '✓ PRESERVED' : '✗ DIFFERENT'}`)
+
+    // The audio bytes MUST be identical (audio is preserved even if ASR fails)
+    expect(bytesMatch).toBe(true)
+
+    // Also check ASR as informational (may fail due to context sensitivity)
+    const theInOutput = outputTranscript.find(w => w.text === 'the' && w.start_ms > 12000 && w.start_ms < 18000)
+    const otherInOutput = outputTranscript.find(w => w.text === 'other' && w.start_ms > 12000 && w.start_ms < 18000)
+    console.log(`ASR detection (informational - may fail due to voice change context):`)
+    console.log(`  "the": ${theInOutput ? '✓ FOUND at ' + theInOutput.start_ms + 'ms' : '✗ NOT DETECTED'}`)
+    console.log(`  "other": ${otherInOutput ? '✓ FOUND at ' + otherInOutput.start_ms + 'ms' : '✗ NOT DETECTED'}`)
+
+    // Verify replacement appears
+    const oneInOutput = outputTranscript.find(w => w.text === 'one' && w.start_ms > 15000)
+    const wallInOutput = outputTranscript.find(w => w.text === 'wall')
+    const powerInOutput = outputTranscript.find(w => w.text === 'power')
+
+    console.log('\n=== REPLACEMENT WORDS ===')
+    console.log(`"one": ${oneInOutput ? '✓ at ' + oneInOutput.start_ms + 'ms' : '✗ MISSING'}`)
+    console.log(`"wall": ${wallInOutput ? '✓ at ' + wallInOutput.start_ms + 'ms' : '✗ MISSING'}`)
+    console.log(`"power": ${powerInOutput ? '✓ at ' + powerInOutput.start_ms + 'ms' : '✗ MISSING'}`)
+  }, 180000)
+
   it('should handle adjacent remove and replacement', async () => {
     if (!fs.existsSync(WHISPER_BIN) || !fs.existsSync(WHISPER_MODEL)) {
       return
