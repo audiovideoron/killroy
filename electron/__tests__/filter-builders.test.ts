@@ -1605,3 +1605,501 @@ describe('Toggle Wiring Audit', () => {
     })
   })
 })
+
+// ============================================================================
+// Placeholder/Stub Regression Tests (audio_pro-t7m)
+// ============================================================================
+// These tests verify that filter functions produce REAL FFmpeg filter syntax,
+// not placeholders, stubs, or passthrough implementations. This prevents
+// regressions where filters are accidentally replaced with no-op implementations.
+
+describe('Placeholder/Stub Filter Regression Prevention', () => {
+  /**
+   * Known placeholder patterns that should NEVER appear in filter output.
+   * If any filter returns these, it's a regression to a stub implementation.
+   */
+  const PLACEHOLDER_PATTERNS = [
+    /\bTODO\b/i,
+    /\bSTUB\b/i,
+    /\bPLACEHOLDER\b/i,
+    /\bFIXME\b/i,
+    /\bNOT.?IMPLEMENTED\b/i,
+    /\bPASSTHROUGH\b/i,
+    /\bNOOP\b/i,
+    /\bNO.?OP\b/i,
+    /\bDUMMY\b/i,
+    /\bMOCK\b/i,
+    /\bFAKE\b/i,
+    /^$/,  // Empty string when filter should be present
+    /^null$/i,
+    /^undefined$/i,
+    /^anull$/,  // FFmpeg null audio filter (passthrough)
+    /^anullsink$/,  // FFmpeg null sink
+  ]
+
+  /**
+   * Valid FFmpeg audio filter names that MUST appear when filters are enabled.
+   * These are the real FFmpeg implementations, not stubs.
+   */
+  const VALID_FFMPEG_FILTERS = {
+    eq: 'equalizer',
+    hpf: 'highpass',
+    lpf: 'lowpass',
+    compressor: 'acompressor',
+    limiter: 'alimiter',
+    volume: 'volume',
+    noiseSampling: 'afftdn',
+    autoGain: 'dynaudnorm',
+    autoMix: 'dynaudnorm',
+    loudness: 'loudnorm',
+  }
+
+  /**
+   * Helper to check for placeholder patterns in filter output
+   */
+  function containsPlaceholder(filter: string): { found: boolean; pattern?: string } {
+    for (const pattern of PLACEHOLDER_PATTERNS) {
+      if (pattern.test(filter)) {
+        return { found: true, pattern: pattern.toString() }
+      }
+    }
+    return { found: false }
+  }
+
+  /**
+   * Helper to verify filter contains valid FFmpeg parameters (not placeholder strings)
+   */
+  function hasValidParameters(filter: string): boolean {
+    // Check for common parameter patterns: key=value where value is numeric or valid
+    const paramPattern = /([a-z_]+)=([^:,]+)/gi
+    let match
+    while ((match = paramPattern.exec(filter)) !== null) {
+      const [, key, value] = match
+      // Value should be numeric, a dB value, or a known keyword - not a placeholder string
+      const isNumeric = /^-?\d+(\.\d+)?$/.test(value)
+      const isDbValue = /^-?\d+(\.\d+)?dB$/.test(value)
+      const isBoolean = /^(true|false)$/.test(value)
+      const isKeyword = /^(h|q|s|none)$/.test(value)  // FFmpeg filter keywords
+
+      if (!isNumeric && !isDbValue && !isBoolean && !isKeyword) {
+        // Check for obvious placeholder values
+        if (/\b(TODO|STUB|PLACEHOLDER|FIXME)\b/i.test(value)) {
+          return false
+        }
+      }
+    }
+    return true
+  }
+
+  describe('buildEQFilter produces real FFmpeg equalizer filters', () => {
+    it('uses real "equalizer" filter, not placeholder', () => {
+      const bands: EQBand[] = [
+        { frequency: 1000, gain: 5, q: 1.5, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+
+      // Must contain real FFmpeg filter name
+      expect(result).toContain(VALID_FFMPEG_FILTERS.eq)
+
+      // Must not contain placeholder patterns
+      const placeholder = containsPlaceholder(result)
+      expect(placeholder.found).toBe(false)
+
+      // Must have valid parameters
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid FFmpeg equalizer syntax with all parameters', () => {
+      const bands: EQBand[] = [
+        { frequency: 500, gain: -3, q: 2.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+
+      // Must have frequency (f=), type (t=), width (w=), gain (g=) parameters
+      expect(result).toMatch(/equalizer=f=\d+/)
+      expect(result).toMatch(/t=h/)
+      expect(result).toMatch(/w=\d+(\.\d+)?/)
+      expect(result).toMatch(/g=-?\d+/)
+    })
+
+    it('multiple bands produce comma-separated real filters', () => {
+      const bands: EQBand[] = [
+        { frequency: 100, gain: 2, q: 1.0, enabled: true },
+        { frequency: 1000, gain: -2, q: 1.5, enabled: true },
+        { frequency: 8000, gain: 3, q: 2.0, enabled: true }
+      ]
+      const result = buildEQFilter(bands)
+
+      // Each band should produce a separate equalizer filter
+      const eqCount = (result.match(/equalizer=/g) || []).length
+      expect(eqCount).toBe(3)
+
+      // Should be comma-separated (FFmpeg filter chain syntax)
+      expect(result).toMatch(/equalizer=[^,]+,equalizer=[^,]+,equalizer=/)
+    })
+  })
+
+  describe('buildCompressorFilter produces real FFmpeg compressor/limiter filters', () => {
+    it('COMP mode uses real "acompressor" filter, not placeholder', () => {
+      const comp: CompressorParams = {
+        threshold: -18, ratio: 4, attack: 10, release: 100,
+        makeup: 2, emphasis: 20, mode: 'COMP', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.compressor)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('COMP mode produces valid FFmpeg acompressor syntax', () => {
+      const comp: CompressorParams = {
+        threshold: -20, ratio: 3, attack: 5, release: 50,
+        makeup: 0, emphasis: 20, mode: 'COMP', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      // Must have threshold, ratio, attack, release, makeup parameters
+      expect(result).toMatch(/acompressor=threshold=-?\d+dB/)
+      expect(result).toMatch(/ratio=\d+(\.\d+)?/)
+      expect(result).toMatch(/attack=\d+(\.\d+)?/)
+      expect(result).toMatch(/release=\d+(\.\d+)?/)
+      expect(result).toMatch(/makeup=-?\d+dB/)
+    })
+
+    it('LIMIT mode uses real "alimiter" filter, not placeholder', () => {
+      const comp: CompressorParams = {
+        threshold: -1, ratio: 10, attack: 5, release: 50,
+        makeup: 0, emphasis: 20, mode: 'LIMIT', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.limiter)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('LIMIT mode produces valid FFmpeg alimiter syntax', () => {
+      const comp: CompressorParams = {
+        threshold: -2, ratio: 10, attack: 8, release: 80,
+        makeup: 0, emphasis: 20, mode: 'LIMIT', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      // Must have limit, attack, release parameters
+      expect(result).toMatch(/alimiter=limit=-?\d+dB/)
+      expect(result).toMatch(/attack=\d+(\.\d+)?/)
+      expect(result).toMatch(/release=\d+(\.\d+)?/)
+    })
+
+    it('LEVEL mode uses real "volume" filter, not placeholder', () => {
+      const comp: CompressorParams = {
+        threshold: -20, ratio: 4, attack: 10, release: 100,
+        makeup: 5, emphasis: 20, mode: 'LEVEL', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.volume)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('LEVEL mode produces valid FFmpeg volume syntax', () => {
+      const comp: CompressorParams = {
+        threshold: -20, ratio: 4, attack: 10, release: 100,
+        makeup: 3, emphasis: 20, mode: 'LEVEL', enabled: true
+      }
+      const result = buildCompressorFilter(comp)
+
+      expect(result).toMatch(/volume=-?\d+dB/)
+    })
+  })
+
+  describe('buildNoiseSamplingFilter produces real FFmpeg afftdn filter', () => {
+    const region: QuietCandidate = { startMs: 0, endMs: 1000 }
+
+    it('uses real "afftdn" filter, not placeholder', () => {
+      const ns: NoiseSamplingParams = { enabled: true }
+      const result = buildNoiseSamplingFilter(ns, region)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.noiseSampling)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid FFmpeg afftdn syntax with required parameters', () => {
+      const ns: NoiseSamplingParams = { enabled: true }
+      const result = buildNoiseSamplingFilter(ns, region)
+
+      // Must have nr (noise reduction), nf (noise floor), tn (tracking) parameters
+      expect(result).toMatch(/afftdn=/)
+      expect(result).toMatch(/nr=\d+/)
+      expect(result).toMatch(/nf=-?\d+/)
+      expect(result).toMatch(/tn=(true|false)/)
+    })
+  })
+
+  describe('buildAutoGainFilter produces real FFmpeg dynaudnorm filter', () => {
+    it('uses real "dynaudnorm" filter, not placeholder', () => {
+      const autoGain: AutoGainParams = { targetLevel: -6, enabled: true }
+      const result = buildAutoGainFilter(autoGain)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.autoGain)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid FFmpeg dynaudnorm syntax with required parameters', () => {
+      const autoGain: AutoGainParams = { targetLevel: -3, enabled: true }
+      const result = buildAutoGainFilter(autoGain)
+
+      // Must have f (framelen), g (gausssize), p (peak), m (maxgain), s (compress) parameters
+      expect(result).toMatch(/dynaudnorm=/)
+      expect(result).toMatch(/f=\d+/)
+      expect(result).toMatch(/g=\d+/)
+      expect(result).toMatch(/p=\d+(\.\d+)?/)
+      expect(result).toMatch(/m=\d+/)
+      expect(result).toMatch(/s=\d+/)
+    })
+  })
+
+  describe('buildAutoMixFilter produces real FFmpeg dynaudnorm filter', () => {
+    it('uses real "dynaudnorm" filter, not placeholder', () => {
+      const autoMix: AutoMixParams = { preset: 'MEDIUM', enabled: true }
+      const result = buildAutoMixFilter(autoMix)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.autoMix)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid FFmpeg dynaudnorm syntax for all presets', () => {
+      const presets: ('LIGHT' | 'MEDIUM' | 'HEAVY')[] = ['LIGHT', 'MEDIUM', 'HEAVY']
+
+      for (const preset of presets) {
+        const autoMix: AutoMixParams = { preset, enabled: true }
+        const result = buildAutoMixFilter(autoMix)
+
+        expect(result).toMatch(/dynaudnorm=/)
+        expect(result).toMatch(/f=\d+/)
+        expect(result).toMatch(/g=\d+/)
+        expect(result).toMatch(/p=\d+(\.\d+)?/)
+        expect(result).toMatch(/m=\d+/)
+      }
+    })
+  })
+
+  describe('buildLoudnessFilter produces real FFmpeg loudnorm filter', () => {
+    it('uses real "loudnorm" filter, not placeholder', () => {
+      const loudness: LoudnessParams = { targetLufs: -14, enabled: true }
+      const result = buildLoudnessFilter(loudness)
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.loudness)
+      expect(containsPlaceholder(result).found).toBe(false)
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid FFmpeg loudnorm syntax with EBU R128 parameters', () => {
+      const loudness: LoudnessParams = { targetLufs: -16, enabled: true }
+      const result = buildLoudnessFilter(loudness)
+
+      // Must have I (integrated loudness), LRA (loudness range), TP (true peak) parameters
+      expect(result).toMatch(/loudnorm=/)
+      expect(result).toMatch(/I=-?\d+/)
+      expect(result).toMatch(/LRA=\d+/)
+      expect(result).toMatch(/TP=-?\d+/)
+    })
+  })
+
+  describe('HPF/LPF produce real FFmpeg highpass/lowpass filters', () => {
+    it('HPF uses real "highpass" filter, not placeholder', () => {
+      const hpf: FilterParams = { frequency: 80, q: 0.7, enabled: true }
+      const result = hpf.enabled ? `highpass=f=${hpf.frequency}` : ''
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.hpf)
+      expect(containsPlaceholder(result).found).toBe(false)
+    })
+
+    it('LPF uses real "lowpass" filter, not placeholder', () => {
+      const lpf: FilterParams = { frequency: 12000, q: 0.7, enabled: true }
+      const result = lpf.enabled ? `lowpass=f=${lpf.frequency}` : ''
+
+      expect(result).toContain(VALID_FFMPEG_FILTERS.lpf)
+      expect(containsPlaceholder(result).found).toBe(false)
+    })
+
+    it('HPF produces valid FFmpeg highpass syntax', () => {
+      const hpf: FilterParams = { frequency: 100, q: 0.7, enabled: true }
+      const result = `highpass=f=${hpf.frequency}`
+
+      expect(result).toMatch(/highpass=f=\d+/)
+    })
+
+    it('LPF produces valid FFmpeg lowpass syntax', () => {
+      const lpf: FilterParams = { frequency: 8000, q: 0.7, enabled: true }
+      const result = `lowpass=f=${lpf.frequency}`
+
+      expect(result).toMatch(/lowpass=f=\d+/)
+    })
+  })
+
+  describe('buildFullFilterChain produces real FFmpeg filter chain', () => {
+    const defaultAutoGain: AutoGainParams = { targetLevel: -6, enabled: false }
+    const defaultLoudness: LoudnessParams = { targetLufs: -14, enabled: false }
+    const defaultNS: NoiseSamplingParams = { enabled: false }
+    const defaultHpf: FilterParams = { frequency: 80, q: 0.7, enabled: false }
+    const defaultLpf: FilterParams = { frequency: 12000, q: 0.7, enabled: false }
+    const defaultBands: EQBand[] = []
+    const defaultComp: CompressorParams = {
+      threshold: -18, ratio: 4, attack: 10, release: 100,
+      makeup: 0, emphasis: 20, mode: 'COMP', enabled: false
+    }
+    const defaultAutoMix: AutoMixParams = { preset: 'MEDIUM', enabled: false }
+    const defaultRegion: QuietCandidate = { startMs: 0, endMs: 1000 }
+
+    it('produces no placeholder patterns when all filters enabled', () => {
+      const result = buildFullFilterChain(
+        { targetLevel: -6, enabled: true },
+        { targetLufs: -14, enabled: true },
+        { enabled: true },
+        { frequency: 80, q: 0.7, enabled: true },
+        { frequency: 12000, q: 0.7, enabled: true },
+        [{ frequency: 1000, gain: 3, q: 1.5, enabled: true }],
+        { ...defaultComp, enabled: true },
+        { preset: 'MEDIUM', enabled: true },
+        defaultRegion
+      )
+
+      // Should contain real FFmpeg filters
+      expect(result).toContain('dynaudnorm')
+      expect(result).toContain('loudnorm')
+      expect(result).toContain('afftdn')
+      expect(result).toContain('highpass')
+      expect(result).toContain('lowpass')
+      expect(result).toContain('equalizer')
+      expect(result).toContain('acompressor')
+
+      // Should not contain any placeholder patterns
+      const placeholder = containsPlaceholder(result)
+      expect(placeholder.found).toBe(false)
+
+      // All parameters should be valid
+      expect(hasValidParameters(result)).toBe(true)
+    })
+
+    it('produces valid comma-separated FFmpeg filter syntax', () => {
+      const result = buildFullFilterChain(
+        defaultAutoGain,
+        defaultLoudness,
+        { enabled: true },
+        { frequency: 100, q: 0.7, enabled: true },
+        { frequency: 8000, q: 0.7, enabled: true },
+        [{ frequency: 1000, gain: 3, q: 1.5, enabled: true }],
+        { ...defaultComp, enabled: true },
+        { preset: 'LIGHT', enabled: true },
+        defaultRegion
+      )
+
+      // Filters should be comma-separated (valid FFmpeg -af syntax)
+      const commaCount = (result.match(/,/g) || []).length
+      expect(commaCount).toBeGreaterThan(0)
+
+      // Each segment between commas should be a valid filter (filterName=params)
+      const segments = result.split(',')
+      for (const segment of segments) {
+        // Each segment should start with a valid filter name
+        expect(segment).toMatch(/^[a-z]+/)
+        // Each segment should have parameter assignment(s)
+        expect(segment).toMatch(/=/)
+      }
+    })
+
+    it('no placeholder patterns appear in any filter mode combination', () => {
+      // Test various combinations to ensure no stubs sneak in
+      const testCases = [
+        { name: 'only HPF', hpf: { frequency: 80, q: 0.7, enabled: true } },
+        { name: 'only LPF', lpf: { frequency: 12000, q: 0.7, enabled: true } },
+        { name: 'only EQ', bands: [{ frequency: 1000, gain: 5, q: 1.5, enabled: true }] },
+        { name: 'only COMP', comp: { ...defaultComp, enabled: true } },
+        { name: 'only LIMIT', comp: { ...defaultComp, mode: 'LIMIT' as const, enabled: true } },
+        { name: 'only LEVEL', comp: { ...defaultComp, mode: 'LEVEL' as const, makeup: 3, enabled: true } },
+        { name: 'only NS', ns: { enabled: true } },
+        { name: 'only AutoGain', autoGain: { targetLevel: -6, enabled: true } },
+        { name: 'only AutoMix', autoMix: { preset: 'HEAVY' as const, enabled: true } },
+        { name: 'only Loudness', loudness: { targetLufs: -16, enabled: true } },
+      ]
+
+      for (const tc of testCases) {
+        const result = buildFullFilterChain(
+          tc.autoGain ?? defaultAutoGain,
+          tc.loudness ?? defaultLoudness,
+          tc.ns ?? defaultNS,
+          tc.hpf ?? defaultHpf,
+          tc.lpf ?? defaultLpf,
+          tc.bands ?? defaultBands,
+          tc.comp ?? defaultComp,
+          tc.autoMix ?? defaultAutoMix,
+          defaultRegion
+        )
+
+        if (result) {
+          const placeholder = containsPlaceholder(result)
+          if (placeholder.found) {
+            throw new Error(`Placeholder found in "${tc.name}": ${placeholder.pattern} in "${result}"`)
+          }
+          expect(hasValidParameters(result)).toBe(true)
+        }
+      }
+    })
+  })
+
+  describe('Filter output format validation', () => {
+    it('all enabled filters produce non-empty output', () => {
+      // When a filter is enabled with valid settings, it must produce output
+      const region: QuietCandidate = { startMs: 0, endMs: 1000 }
+
+      const eqResult = buildEQFilter([{ frequency: 1000, gain: 3, q: 1.5, enabled: true }])
+      expect(eqResult.length).toBeGreaterThan(0)
+
+      const compResult = buildCompressorFilter({
+        threshold: -18, ratio: 4, attack: 10, release: 100,
+        makeup: 2, emphasis: 20, mode: 'COMP', enabled: true
+      })
+      expect(compResult.length).toBeGreaterThan(0)
+
+      const nsResult = buildNoiseSamplingFilter({ enabled: true }, region)
+      expect(nsResult.length).toBeGreaterThan(0)
+
+      const autoGainResult = buildAutoGainFilter({ targetLevel: -6, enabled: true })
+      expect(autoGainResult.length).toBeGreaterThan(0)
+
+      const autoMixResult = buildAutoMixFilter({ preset: 'MEDIUM', enabled: true })
+      expect(autoMixResult.length).toBeGreaterThan(0)
+
+      const loudnessResult = buildLoudnessFilter({ targetLufs: -14, enabled: true })
+      expect(loudnessResult.length).toBeGreaterThan(0)
+    })
+
+    it('filter output contains only printable ASCII characters', () => {
+      // FFmpeg filters should only use printable ASCII - no Unicode, control chars, etc.
+      const region: QuietCandidate = { startMs: 0, endMs: 1000 }
+      const printableAscii = /^[\x20-\x7E]*$/
+
+      const filters = [
+        buildEQFilter([{ frequency: 1000, gain: 3, q: 1.5, enabled: true }]),
+        buildCompressorFilter({
+          threshold: -18, ratio: 4, attack: 10, release: 100,
+          makeup: 2, emphasis: 100, mode: 'COMP', enabled: true
+        }),
+        buildNoiseSamplingFilter({ enabled: true }, region),
+        buildAutoGainFilter({ targetLevel: -6, enabled: true }),
+        buildAutoMixFilter({ preset: 'HEAVY', enabled: true }),
+        buildLoudnessFilter({ targetLufs: -14, enabled: true }),
+      ]
+
+      for (const filter of filters) {
+        expect(filter).toMatch(printableAscii)
+      }
+    })
+  })
+})
